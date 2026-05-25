@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { readDb, writeDb } from "./server/db";
 
 dotenv.config();
 
@@ -25,6 +26,140 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json({ limit: '10mb' }));
+
+  // --- DATABASE ENDPOINTS ---
+
+  // 1. Get all stores
+  app.get("/api/stores", async (req, res) => {
+    try {
+      const db = await readDb();
+      res.json(db.stores || []);
+    } catch (error: any) {
+      res.status(500).json({ error: "读取店铺数据失败", message: error.message });
+    }
+  });
+
+  // 2. Save or update store
+  app.post("/api/stores", async (req, res) => {
+    try {
+      const store = req.body;
+      if (!store || !store.id) {
+        return res.status(400).json({ error: "缺少店铺数据或ID" });
+      }
+      const db = await readDb();
+      const index = db.stores.findIndex((s) => s.id === store.id);
+      if (index >= 0) {
+        db.stores[index] = store;
+      } else {
+        db.stores.push(store);
+      }
+      await writeDb(db);
+      res.json({ success: true, store });
+    } catch (error: any) {
+      res.status(500).json({ error: "保存店铺数据失败", message: error.message });
+    }
+  });
+
+  // 3. Delete a store and its associated SKUs
+  app.delete("/api/stores/:id", async (req, res) => {
+    try {
+      const storeId = req.params.id;
+      if (!storeId) {
+        return res.status(400).json({ error: "缺少店铺ID" });
+      }
+      const db = await readDb();
+      db.stores = db.stores.filter((s) => s.id !== storeId);
+      db.skus = db.skus.filter((sku) => sku.storeId !== storeId);
+      await writeDb(db);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: "删除店铺失败", message: error.message });
+    }
+  });
+
+  // 4. Get SKUs (with optional storeId filtering)
+  app.get("/api/skus", async (req, res) => {
+    try {
+      const db = await readDb();
+      const { storeId } = req.query;
+      if (storeId) {
+        const filtered = db.skus.filter((sku) => sku.storeId === storeId);
+        return res.json(filtered);
+      }
+      res.json(db.skus || []);
+    } catch (error: any) {
+      res.status(500).json({ error: "读取SKU数据失败", message: error.message });
+    }
+  });
+
+  // 5. Save or update a SKU
+  app.post("/api/skus", async (req, res) => {
+    try {
+      const skuData = req.body;
+      if (!skuData || !skuData.sku || !skuData.storeId) {
+        return res.status(400).json({ error: "缺少SKU数据、SKU编码或店铺ID" });
+      }
+      const db = await readDb();
+      const index = db.skus.findIndex(
+        (sku) => sku.sku === skuData.sku && sku.storeId === skuData.storeId
+      );
+
+      const dataToSave = {
+        ...skuData,
+        lastUpdated: new Date().toISOString()
+      };
+      delete dataToSave.analysisLoading;
+
+      if (index >= 0) {
+        db.skus[index] = dataToSave;
+      } else {
+        db.skus.push(dataToSave);
+      }
+
+      await writeDb(db);
+      res.json({ success: true, sku: dataToSave });
+    } catch (error: any) {
+      res.status(500).json({ error: "保存SKU数据失败", message: error.message });
+    }
+  });
+
+  // 6. Bulk save SKUs
+  app.post("/api/skus/bulk", async (req, res) => {
+    try {
+      const skus = req.body;
+      if (!Array.isArray(skus)) {
+        return res.status(400).json({ error: "数据格式不正确，应为SKU数组" });
+      }
+      const db = await readDb();
+      const skuMap = new Map(db.skus.map((s) => [`${s.storeId}_${s.sku}`, s]));
+
+      skus.forEach((s) => {
+        if (!s.sku || !s.storeId) return;
+        const dataToSave = {
+          ...s,
+          lastUpdated: new Date().toISOString()
+        };
+        delete dataToSave.analysisLoading;
+        skuMap.set(`${s.storeId}_${s.sku}`, dataToSave);
+      });
+
+      db.skus = Array.from(skuMap.values());
+      await writeDb(db);
+      res.json({ success: true, count: skus.length });
+    } catch (error: any) {
+      res.status(500).json({ error: "批量保存SKU数据失败", message: error.message });
+    }
+  });
+
+  // 7. Clear all data
+  app.post("/api/clear", async (req, res) => {
+    try {
+      await writeDb({ stores: [], skus: [] });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: "清除数据失败", message: error.message });
+    }
+  });
 
   // AI analysis endpoint
   app.post("/api/analyze", async (req, res) => {

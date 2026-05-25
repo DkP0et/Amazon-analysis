@@ -1,112 +1,113 @@
 import { SKUPerformance, Store } from "../types";
 
-const LOCAL_STORAGE_KEY = 'seller_pulse_skus';
-const STORES_KEY = 'seller_pulse_stores';
-
 export const skuService = {
   async getStores(): Promise<Store[]> {
     try {
-      const data = localStorage.getItem(STORES_KEY);
-      if (!data) return [];
-      return JSON.parse(data);
+      const resp = await fetch("/api/stores");
+      if (!resp.ok) {
+        throw new Error(`Failed to load stores: ${resp.statusText}`);
+      }
+      return await resp.json();
     } catch (error) {
-      console.error('Local Storage Error (Read Stores):', error);
+      console.error('Remote Storage Error (Read Stores):', error);
       return [];
     }
   },
 
   async saveStore(store: Store): Promise<void> {
     try {
-      const stores = await this.getStores();
-      const index = stores.findIndex(s => s.id === store.id);
-      const nextStores = [...stores];
-      if (index >= 0) {
-        nextStores[index] = store;
-      } else {
-        nextStores.push(store);
+      const resp = await fetch("/api/stores", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(store)
+      });
+      if (!resp.ok) {
+        throw new Error(`Failed to save store: ${resp.statusText}`);
       }
-      localStorage.setItem(STORES_KEY, JSON.stringify(nextStores));
     } catch (error) {
-      console.error('Local Storage Error (Save Store):', error);
+      console.error('Remote Storage Error (Save Store):', error);
     }
   },
 
   async deleteStore(storeId: string): Promise<void> {
     try {
-      const stores = await this.getStores();
-      const nextStores = stores.filter(s => s.id !== storeId);
-      localStorage.setItem(STORES_KEY, JSON.stringify(nextStores));
-      
-      // Also delete all SKUs associated with this store
-      const skus = await this.getAllSkus();
-      const nextSkus = skus.filter(s => s.storeId !== storeId);
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(nextSkus));
+      const resp = await fetch(`/api/stores/${storeId}`, {
+        method: "DELETE"
+      });
+      if (!resp.ok) {
+        throw new Error(`Failed to delete store: ${resp.statusText}`);
+      }
     } catch (error) {
-      console.error('Local Storage Error (Delete Store):', error);
+      console.error('Remote Storage Error (Delete Store):', error);
     }
   },
 
   async getAllSkus(): Promise<SKUPerformance[]> {
     try {
-      const data = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (!data) return [];
-      return JSON.parse(data);
+      const resp = await fetch("/api/skus");
+      if (!resp.ok) {
+        throw new Error(`Failed to load SKUs: ${resp.statusText}`);
+      }
+      return await resp.json();
     } catch (error) {
-      console.error('Local Storage Error (Read):', error);
+      console.error('Remote Storage Error (Read SKUs):', error);
       return [];
     }
   },
 
   async getSkusByStore(storeId: string): Promise<SKUPerformance[]> {
-    const all = await this.getAllSkus();
-    return all.filter(s => s.storeId === storeId);
+    try {
+      const resp = await fetch(`/api/skus?storeId=${encodeURIComponent(storeId)}`);
+      if (!resp.ok) {
+        throw new Error(`Failed to load SKUs for store: ${resp.statusText}`);
+      }
+      return await resp.json();
+    } catch (error) {
+      console.error('Remote Storage Error (Read SKUs by Store):', error);
+      return [];
+    }
   },
 
   async saveSku(skuData: SKUPerformance): Promise<void> {
     try {
-      const allSkus = await this.getAllSkus();
-      const nextSkus = [...allSkus];
-      // Use combined key of storeId and sku
-      const index = nextSkus.findIndex(s => s.sku === skuData.sku && s.storeId === skuData.storeId);
-      
-      const dataToSave = {
-        ...skuData,
-        lastUpdated: new Date().toISOString()
-      };
-      delete (dataToSave as any).analysisLoading;
-
-      if (index >= 0) {
-        nextSkus[index] = dataToSave;
-      } else {
-        nextSkus.push(dataToSave);
+      const resp = await fetch("/api/skus", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(skuData)
+      });
+      if (!resp.ok) {
+        throw new Error(`Failed to save SKU: ${resp.statusText}`);
       }
-
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(nextSkus));
     } catch (error) {
-      console.error('Local Storage Error (Save):', error);
+      console.error('Remote Storage Error (Save SKU):', error);
     }
   },
 
   async bulkSaveSkus(skus: SKUPerformance[]): Promise<void> {
     try {
-      const existing = await this.getAllSkus();
-      // Store based mapping
-      const skuMap = new Map(existing.map(s => [`${s.storeId}_${s.sku}`, s]));
-      
-      skus.forEach(s => {
-        const dataToSave = { ...s, lastUpdated: new Date().toISOString() };
-        delete (dataToSave as any).analysisLoading;
-        skuMap.set(`${s.storeId}_${s.sku}`, dataToSave);
+      const resp = await fetch("/api/skus/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(skus)
       });
-
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(Array.from(skuMap.values())));
+      if (!resp.ok) {
+        throw new Error(`Failed to bulk save SKUs: ${resp.statusText}`);
+      }
     } catch (error) {
-      console.error('Local Storage Error (Bulk Save):', error);
+      console.error('Remote Storage Error (Bulk Save SKUs):', error);
     }
   },
 
   async clearAllData(): Promise<void> {
-    localStorage.removeItem(LOCAL_STORAGE_KEY);
-    localStorage.removeItem(STORES_KEY);
+    try {
+      const resp = await fetch("/api/clear", {
+        method: "POST"
+      });
+      if (!resp.ok) {
+        throw new Error(`Failed to clear database: ${resp.statusText}`);
+      }
+    } catch (error) {
+      console.error('Remote Storage Error (Clear Data):', error);
+    }
   }
 };
