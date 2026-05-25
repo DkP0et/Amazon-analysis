@@ -19,11 +19,27 @@ export interface InventoryData {
   stockLevel: number;
 }
 
+export interface RestockInsight {
+  avgDailySales: number;       // Average daily sales calculated across history
+  leadTimeDemand: number;      // Demand during lead time (Average daily sales * Lead time days)
+  safetyStock: number;         // Safety stock volume (Average daily sales * Safety stock days)
+  reorderPoint: number;        // Reorder Point = Lead Time Demand + Safety Stock
+  daysOfSupply: number;        // Days of Supply left = (Current Stock + In-Transit) / Average Daily Sales
+  suggestedQuantity: number;   // Recommended replenishment qty to cover target days (e.g., 60 days)
+  targetCoverageDays: number;  // The supply coverage period used (e.g. 60 or 90 days)
+  explanation: string;         // Professional AI-generated analysis of demand and delivery logic
+  analyzedAt: string;          // Timestamp of calculations
+}
+
 export interface SKUPerformance {
   sku: string;
   storeId: string;
   history: WeeklyData[];
   currentStock?: number;
+  inTransitStock?: number;     // 在途库存
+  leadTimeDays?: number;       // 头程时间 (天)
+  safetyStockDays?: number;     // 安全库存天数
+  restockInsight?: RestockInsight; // AI 备货预测与计算产出
   insight?: AIInsight;
   analysisLoading?: boolean;
   analysisStatus?: 'idle' | 'success' | 'error';

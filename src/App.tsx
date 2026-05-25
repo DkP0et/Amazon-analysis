@@ -35,7 +35,11 @@ export default function App() {
   const [skuPerformance, setSkuPerformance] = useState<Record<string, SKUPerformance>>({});
   const [selectedSku, setSelectedSku] = useState<string | null>(null);
   const [selectedWeekIndex, setSelectedWeekIndex] = useState<number>(-1); // -1 means latest
-  const [view, setView] = useState<"upload" | "dashboard">("upload");
+  const [view, setView] = useState<"upload" | "dashboard" | "inventory">("upload");
+  const [restockSku, setRestockSku] = useState<string | null>(null);
+  const [restockTargetDays, setRestockTargetDays] = useState<number>(60);
+  const [isRestockLoading, setIsRestockLoading] = useState<boolean>(false);
+  const [savingSku, setSavingSku] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ sales: boolean; inventory: boolean }>({ sales: false, inventory: false });
   const [chartMetric, setChartMetric] = useState<'totalSales' | 'orders'>('totalSales');
@@ -377,12 +381,33 @@ export default function App() {
       });
 
       csvData.forEach(row => {
-        const sku = row.sku || row.SKU || row["Seller SKU"] || row["sku-name"] || row["sku"];
-        const stockStr = (row["available"] || row["afn-fulfillable-quantity"] || row["Available"] || row["Quantity"] || row["quantity"] || "0").toString();
-        const stock = parseInt(stockStr.replace(/,/g, ""));
-        
-        if (sku && currentSkus[sku]) {
+        const skuRaw = row.sku || row.SKU || row["Seller SKU"] || row["sku-name"] || row["sku"] || row["（子）ASIN"] || row["商品SKU"] || row["SKU码"] || row["MSKU"] || row["ASIN"] || "";
+        const sku = skuRaw.toString().trim();
+        if (!sku) return;
+
+        // Try to find stock/available keys
+        const stockKeys = ["available", "afn-fulfillable-quantity", "Available", "Quantity", "quantity", "当前实物", "当前在库", "在庫", "在库数量", "在库", "库存", "可用", "数量"];
+        const rowKeys = Object.keys(row);
+        let foundStockVal = "0";
+        for (const searchKey of stockKeys) {
+          const foundKey = rowKeys.find(rk => rk.trim().toLowerCase() === searchKey.toLowerCase());
+          if (foundKey !== undefined) {
+            foundStockVal = row[foundKey].toString();
+            break;
+          }
+        }
+        const stock = parseInt(foundStockVal.replace(/,/g, "")) || 0;
+
+        if (currentSkus[sku]) {
           currentSkus[sku] = { ...currentSkus[sku], currentStock: stock };
+        } else {
+          currentSkus[sku] = {
+            sku,
+            storeId: activeStoreId,
+            currentStock: stock,
+            inTransitStock: 0,
+            history: []
+          };
         }
       });
     }
@@ -966,6 +991,7 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
       {/* Sidebar Navigation */}
       <aside className="w-64 bg-[#0F172A] text-slate-300 flex flex-col shrink-0">
         <div className="p-6 border-b border-slate-800">
@@ -1011,6 +1037,17 @@ export default function App() {
           </button>
 
           <button 
+            onClick={() => setView("inventory")}
+            className={cn(
+              "w-full px-4 py-3 rounded-lg flex items-center gap-3 transition-all duration-200 group text-left",
+              view === "inventory" ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/20" : "hover:bg-slate-800 text-slate-400 hover:text-slate-200"
+            )}
+          >
+            <Package size={18} className={cn(view === "inventory" ? "text-white" : "text-slate-500 group-hover:text-slate-300")} />
+            <span className="font-medium text-sm">库存智能备货</span>
+          </button>
+
+          <button 
             onClick={() => setView("upload")}
             className={cn(
               "w-full px-4 py-3 rounded-lg flex items-center gap-3 transition-all duration-200 group text-left",
@@ -1037,29 +1074,20 @@ export default function App() {
         </div>
 
         <div className="p-4 border-t border-slate-800">
-          <div className="space-y-4">
-            <button 
-              onClick={async () => {
-                if (window.confirm("确定要清除所有本地存储的数据吗？此操作不可撤销，已上传的文件对应的解析记录将全部被擦除。")) {
-                  await skuService.clearAllData();
-                  setSkuPerformance({});
-                  setSelectedSku(null);
-                  setUploadStatus({ sales: false, inventory: false });
-                  setView("upload");
-                }
-              }} 
-              className="w-full px-3 py-2.5 bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white border border-rose-500/20 rounded-lg flex items-center justify-center gap-2 transition-all text-sm font-bold shadow-sm"
-            >
-              <XCircle size={16} /> 清空本地数据
-            </button>
-            <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
-              <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-2">系统状态</p>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-                <p className="text-xs text-emerald-400 font-medium">离线数据库就绪</p>
-              </div>
-            </div>
-          </div>
+          <button 
+            onClick={async () => {
+              if (window.confirm("确定要清除所有本地存储的数据吗？此操作不可撤销，已上传的文件对应的解析记录将全部被擦除。")) {
+                await skuService.clearAllData();
+                setSkuPerformance({});
+                setSelectedSku(null);
+                setUploadStatus({ sales: false, inventory: false });
+                setView("upload");
+              }
+            }} 
+            className="w-full px-3 py-2.5 bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white border border-rose-500/20 rounded-lg flex items-center justify-center gap-2 transition-all text-sm font-bold shadow-sm"
+          >
+            <XCircle size={16} /> 清空本地数据
+          </button>
         </div>
       </aside>
 
@@ -1795,7 +1823,7 @@ export default function App() {
                             </div>
                             <div className="h-48 w-full">
                               <ResponsiveContainer width="100%" height="100%">
-                                <AreaChart data={skuPerformance[selectedSku].history}>
+                                <AreaChart data={[...(skuPerformance[selectedSku]?.history || [])].reverse()}>
                                   <defs>
                                     <linearGradient id="colorMetric" x1="0" y1="0" x2="0" y2="1">
                                       <stop offset="5%" stopColor={chartMetric === 'totalSales' ? "#6366f1" : "#10b981"} stopOpacity={0.1}/>
@@ -2312,8 +2340,8 @@ export default function App() {
                                 </div>
                                 <div className="space-y-4">
                                   <div>
-                                    <p className="text-sm font-bold text-white mb-2">{skuPerformance[selectedSku].insight.summary}</p>
-                                    <p className="text-xs leading-relaxed text-indigo-100 opacity-80">{skuPerformance[selectedSku].insight.diagnosis}</p>
+                                    <p className="text-sm font-bold text-white mb-2 whitespace-pre-wrap">{skuPerformance[selectedSku].insight.summary}</p>
+                                    <p className="text-xs leading-relaxed text-indigo-100 opacity-80 whitespace-pre-wrap">{skuPerformance[selectedSku].insight.diagnosis}</p>
                                   </div>
                                 </div>
                               </div>
@@ -2392,6 +2420,489 @@ export default function App() {
                   )}
                 </div>
 
+              </div>
+            </div>
+          )}
+
+          {view === "inventory" && (
+            <div className="p-8 space-y-8 max-w-[1550px] mx-auto animate-fade-in">
+              {/* Header */}
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-xs">
+                <div>
+                  <h2 className="text-2xl font-extrabold tracking-tight text-slate-900 flex items-center gap-2">
+                    <Package className="text-indigo-600" size={24} /> 科学库存与备货管理
+                  </h2>
+                  <p className="text-sm text-slate-500 mt-1">
+                    集成供应链 ROP（再订货点）与安全库存（Safety Stock）模型，通过历史销售流速预测精准采购备货量。
+                  </p>
+                </div>
+                
+                <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-2 border border-slate-200">
+                  <span className="text-xs font-bold text-slate-600 tracking-wider">全局目标备货覆盖天数:</span>
+                  <input 
+                    type="number" 
+                    value={restockTargetDays === 0 ? "" : restockTargetDays}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setRestockTargetDays(val === "" ? 0 : parseInt(val) || 0);
+                    }}
+                    onBlur={() => {
+                      if (restockTargetDays < 7) {
+                        setRestockTargetDays(30);
+                      }
+                    }}
+                    className="w-16 bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-center text-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    title="当计算备货建议时，期望新备货进入后能支撑多少天的周转销量"
+                  />
+                  <span className="text-xs font-bold text-slate-500">天</span>
+                </div>
+              </div>
+
+              {/* KPI Summary Rows */}
+              {(() => {
+                const currentStoreSkus = (Object.values(skuPerformance) as SKUPerformance[]).filter(s => s.storeId === activeStoreId);
+                const totalCurrent = currentStoreSkus.reduce((acc, curr) => acc + (curr.currentStock || 0), 0);
+                const totalInTransit = currentStoreSkus.reduce((acc, curr) => acc + (curr.inTransitStock || 0), 0);
+                const activeSkuCount = currentStoreSkus.length;
+                
+                // Count alerts: total stock (current + transit) is less than Reorder Point or safety stock
+                const alertCount = currentStoreSkus.filter(s => {
+                  const history = s.history || [];
+                  const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
+                  const totalDays = history.length * 7;
+                  const avgDailySales = totalDays > 0 ? (totalOrders / totalDays) : 0;
+                  const leadTimeDemand = avgDailySales * (s.leadTimeDays ?? 30);
+                  const safetyStock = avgDailySales * (s.safetyStockDays ?? 15);
+                  const reorderPoint = leadTimeDemand + safetyStock;
+                  return ((s.currentStock || 0) + (s.inTransitStock || 0)) < reorderPoint;
+                }).length;
+
+                return (
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                      <div className="space-y-1">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">在管 SKU 款数</span>
+                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{activeSkuCount}</p>
+                      </div>
+                      <div className="p-3 bg-indigo-50 text-indigo-600 rounded-xl"><Layers size={20} /></div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                      <div className="space-y-1">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">当前在库在仓</span>
+                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{totalCurrent.toLocaleString()} 件</p>
+                      </div>
+                      <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl"><Package size={20} /></div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                      <div className="space-y-1">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">在途及入仓存货</span>
+                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{totalInTransit.toLocaleString()} 件</p>
+                      </div>
+                      <div className="p-3 bg-blue-50 text-blue-600 rounded-xl"><RefreshCw size={20} /></div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                      <div className="space-y-1">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">备货缺发警戒款数</span>
+                        <p className="text-3xl font-extrabold text-rose-600 tracking-tight">{alertCount} 提警</p>
+                      </div>
+                      <div className={cn(
+                        "p-3 rounded-xl",
+                        alertCount > 0 ? "bg-rose-50 text-rose-600 animate-pulse" : "bg-emerald-50 text-emerald-600"
+                      )}><AlertTriangle size={20} /></div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Main Workspace splits */}
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+                {/* SKU list table area */}
+                <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden flex flex-col">
+                  <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-50/50">
+                    <div>
+                      <h3 className="font-bold text-base text-slate-900">SKU 库存配给与备货控制台</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">直接修改输入框内的数据，失去焦点 (onBlur) 后系统后台将瞬时自动持久化保存。</p>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                          <th className="py-4 px-4">SKU / 备注名</th>
+                          <th className="py-4 px-3 text-center">当前在库</th>
+                          <th className="py-4 px-3 text-center">在途数量</th>
+                          <th className="py-4 px-3 text-center">头程天数</th>
+                          <th className="py-4 px-3 text-center">安全天数</th>
+                          <th className="py-4 px-3 text-center">剩余天数</th>
+                          <th className="py-4 px-4 text-right">补货操作</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs">
+                        {(() => {
+                          const currentStoreSkus = (Object.values(skuPerformance) as SKUPerformance[]).filter(s => s.storeId === activeStoreId);
+                          if (currentStoreSkus.length === 0) {
+                            return (
+                              <tr>
+                                <td colSpan={7} className="py-12 text-center text-slate-400">
+                                  暂无 SKU 数据。请先前往 “数据导入” 页面上传销售与在库 CSV 文件。
+                                </td>
+                              </tr>
+                            );
+                          }
+                          
+                          const handleInstantSaveField = async (skuObj: SKUPerformance, field: string, val: any) => {
+                            setSavingSku(`${skuObj.sku}_${field}`);
+                            
+                            const updatedSku = {
+                              ...skuObj,
+                              [field]: val
+                            };
+                            
+                            setSkuPerformance(prev => ({
+                              ...prev,
+                              [skuObj.sku]: updatedSku
+                            }));
+                            
+                            await skuService.saveSku(updatedSku);
+                            
+                            setTimeout(() => {
+                              setSavingSku(null);
+                            }, 500);
+                          };
+
+                          const handleRestockAnalyze = async (skuPerf: SKUPerformance) => {
+                            setRestockSku(skuPerf.sku);
+                            setIsRestockLoading(true);
+                            
+                            const skuWithParams = {
+                              ...skuPerf,
+                              currentStock: skuPerf.currentStock ?? 0,
+                              inTransitStock: skuPerf.inTransitStock ?? 0,
+                              leadTimeDays: skuPerf.leadTimeDays ?? 30,
+                              safetyStockDays: skuPerf.safetyStockDays ?? 15,
+                            };
+
+                            try {
+                              const response = await fetch("/api/restock-analyze", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  skuPerformance: skuWithParams,
+                                  targetCoverageDays: restockTargetDays
+                                })
+                              });
+
+                              if (!response.ok) {
+                                throw new Error("备货预测接口请求失败");
+                              }
+
+                              const restockResult = await response.json();
+                              
+                              setSkuPerformance(prev => {
+                                const next = { ...prev };
+                                next[skuPerf.sku] = {
+                                  ...next[skuPerf.sku],
+                                  ...skuWithParams,
+                                  restockInsight: restockResult
+                                };
+                                skuService.saveSku(next[skuPerf.sku]);
+                                return next;
+                              });
+
+                              showToast(`⚡ ${skuPerf.sku} AI供应链备货模型解析成功！`);
+                            } catch (err) {
+                              console.error(err);
+                              showToast("❌ 智能备货模型运算失败，请重试");
+                            } finally {
+                              setIsRestockLoading(false);
+                            }
+                          };
+
+                          return currentStoreSkus.map(s => {
+                            const history = s.history || [];
+                            const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
+                            const totalDays = history.length * 7;
+                            const avgDailySales = totalDays > 0 ? (totalOrders / totalDays) : 0.01;
+                            
+                            const currentStock = s.currentStock ?? 0;
+                            const inTransitStock = s.inTransitStock ?? 0;
+                            const leadTimeDays = s.leadTimeDays ?? 30;
+                            const safetyStockDays = s.safetyStockDays ?? 15;
+                            
+                            const leadTimeDemand = avgDailySales * leadTimeDays;
+                            const safetyStock = avgDailySales * safetyStockDays;
+                            const reorderPoint = leadTimeDemand + safetyStock;
+                            
+                            const daysOfSupply = avgDailySales > 0 ? ((currentStock + inTransitStock) / avgDailySales) : 0;
+                            const totalInvCurrent = currentStock + inTransitStock;
+                            const isBelowROP = totalInvCurrent < reorderPoint;
+
+                            return (
+                              <tr 
+                                key={s.sku} 
+                                className={cn(
+                                  "hover:bg-slate-50/70 transition-all cursor-pointer",
+                                  restockSku === s.sku ? "bg-indigo-50/30" : ""
+                                )}
+                                onClick={() => setRestockSku(s.sku)}
+                              >
+                                {/* SKU Info */}
+                                <td className="py-4 px-4 max-w-[200px]">
+                                  <div className="font-bold text-slate-950 break-words">{s.sku}</div>
+                                  <input 
+                                    type="text" 
+                                    defaultValue={s.name || ""} 
+                                    onBlur={(e) => handleInstantSaveField(s, 'name', e.target.value)}
+                                    placeholder="备注该 SKU"
+                                    className="text-[10px] bg-transparent text-slate-400 hover:text-slate-600 focus:text-slate-700 outline-none w-full border-b border-transparent focus:border-indigo-400 py-0.5 transition-all"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                </td>
+
+                                {/* Current On-hand Stock */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                    <input 
+                                      type="number" 
+                                      defaultValue={currentStock} 
+                                      onBlur={(e) => handleInstantSaveField(s, 'currentStock', parseInt(e.target.value) || 0)}
+                                      className="w-16 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center font-semibold text-slate-800 outline-none text-xs"
+                                    />
+                                    {savingSku === `${s.sku}_currentStock` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
+                                  </div>
+                                </td>
+
+                                {/* In transit stock */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                    <input 
+                                      type="number" 
+                                      defaultValue={inTransitStock} 
+                                      onBlur={(e) => handleInstantSaveField(s, 'inTransitStock', parseInt(e.target.value) || 0)}
+                                      className="w-16 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center font-semibold text-slate-800 outline-none text-xs"
+                                    />
+                                    {savingSku === `${s.sku}_inTransitStock` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
+                                  </div>
+                                </td>
+
+                                {/* Lead Time Days */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                    <input 
+                                      type="number" 
+                                      defaultValue={leadTimeDays} 
+                                      onBlur={(e) => handleInstantSaveField(s, 'leadTimeDays', parseInt(e.target.value) || 0)}
+                                      className="w-12 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center text-slate-600 outline-none text-xs"
+                                    />
+                                    {savingSku === `${s.sku}_leadTimeDays` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
+                                  </div>
+                                </td>
+
+                                {/* Safety Stock Days */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                    <input 
+                                      type="number" 
+                                      defaultValue={safetyStockDays} 
+                                      onBlur={(e) => handleInstantSaveField(s, 'safetyStockDays', parseInt(e.target.value) || 0)}
+                                      className="w-12 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center text-slate-600 outline-none text-xs"
+                                    />
+                                    {savingSku === `${s.sku}_safetyStockDays` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
+                                  </div>
+                                </td>
+
+                                {/* Days of Supply */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  <span className={cn(
+                                    "px-2 py-1 rounded-full text-[10px] font-extrabold border block w-16 mx-auto text-center",
+                                    daysOfSupply >= 45 ? "bg-emerald-50 text-emerald-600 border-emerald-100" :
+                                    daysOfSupply >= 15 ? "bg-amber-50 text-amber-600 border-amber-100" :
+                                    "bg-rose-50 text-rose-600 border-rose-100 animate-pulse"
+                                  )}>
+                                    {daysOfSupply > 180 ? "180+ 天" : `${Math.round(daysOfSupply)} 天`}
+                                  </span>
+                                </td>
+
+                                {/* Action trigger */}
+                                <td className="py-4 px-4 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                                  <div className="flex justify-end items-center gap-1.5">
+                                    {isBelowROP ? (
+                                      <span className="text-[10px] font-bold bg-amber-500/10 text-amber-600 px-1.5 py-0.5 rounded border border-amber-500/20 mr-1 text-center" title={`科学安全水位再订货点: ${reorderPoint.toFixed(0)}件`}>
+                                        提警采购(ROP:{Math.round(reorderPoint)}件)
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] font-medium text-slate-400 mr-2">
+                                        水位健全
+                                      </span>
+                                    )}
+                                    <button 
+                                      onClick={() => handleRestockAnalyze(s)}
+                                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-[11px] rounded-lg shadow-sm hover:shadow-xs transition-all flex items-center gap-1 shrink-0"
+                                      title="结合采购头程与销售流速进行AI供应链补货精确数学测算"
+                                    >
+                                      <BrainCircuit size={12} />
+                                      AI 备货分析
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          });
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Right side diagnostics */}
+                <div className="xl:col-span-1 flex flex-col space-y-6">
+                  {restockSku && skuPerformance[restockSku] ? (
+                    (() => {
+                      const sObj = skuPerformance[restockSku];
+                      const insight = sObj.restockInsight;
+                      const hasResult = !!insight;
+                      
+                      const h = sObj.history || [];
+                      const tot = h.reduce((sum, item) => sum + (item.orders || 0), 0);
+                      const days = h.length * 7;
+                      const localAvg = days > 0 ? (tot / days) : 1;
+                      const currentStock = sObj.currentStock ?? 0;
+                      const inTransitStock = sObj.inTransitStock ?? 0;
+                      const localReplenish = Math.max(0, Math.ceil((localAvg * restockTargetDays) - currentStock - inTransitStock));
+
+                      return (
+                        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                          {/* Panel Header */}
+                          <div className="p-6 border-b border-indigo-950 bg-[#0F172A] text-white flex justify-between items-center">
+                            <div>
+                              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">AI 补货科学诊断书</p>
+                              <h4 className="font-extrabold text-base tracking-tight mt-0.5 break-all">{restockSku}</h4>
+                            </div>
+                            <div className="px-2 py-0.5 bg-indigo-500/20 border border-indigo-400/30 rounded text-[9px] uppercase tracking-wider text-indigo-300 font-mono shrink-0">
+                              {sObj.name || "正常监控"}
+                            </div>
+                          </div>
+
+                          <AnimatePresence mode="wait">
+                            {isRestockLoading ? (
+                              <motion.div 
+                                key="loading"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="p-12 text-center flex flex-col items-center justify-center space-y-4"
+                              >
+                                <Loader2 className="text-indigo-600 animate-spin" size={32} />
+                                <div className="space-y-1">
+                                  <p className="font-bold text-sm text-slate-800">正在生成科学采购建议...</p>
+                                  <p className="text-[10px] text-slate-400 max-w-[200px]">AI 正在获取最近 {h.length} 周的订单流速、头程时限，计算安全缓冲以预防断货。</p>
+                                </div>
+                              </motion.div>
+                            ) : hasResult ? (
+                              <motion.div 
+                                key="content"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="p-6 space-y-6"
+                              >
+                                {/* Metrics Grid */}
+                                <div className="grid grid-cols-2 gap-3.5">
+                                  <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl">
+                                    <p className="text-[10px] text-slate-400 font-bold uppercase mb-0.5 leading-normal">预测日均销量</p>
+                                    <p className="text-lg font-extrabold text-slate-900 font-mono">{insight.avgDailySales.toFixed(2)} <span className="text-[10px] font-semibold text-slate-500">件/日</span></p>
+                                  </div>
+                                  <div className="p-3 bg-amber-500/5 border border-amber-500/10 rounded-xl">
+                                    <p className="text-[10px] text-amber-600 font-bold uppercase mb-0.5 leading-normal">头程消耗 (LTD)</p>
+                                    <p className="text-lg font-extrabold text-amber-700 font-mono">{Math.round(insight.leadTimeDemand)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
+                                  </div>
+                                  <div className="p-3 bg-blue-50 border border-blue-100/50 rounded-xl">
+                                    <p className="text-[10px] text-blue-500 font-bold uppercase mb-0.5 leading-normal">安全库存缓冲 (SS)</p>
+                                    <p className="text-lg font-extrabold text-blue-700 font-mono">{Math.round(insight.safetyStock)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
+                                  </div>
+                                  <div className="p-3 bg-indigo-50 border border-indigo-100/50 rounded-xl">
+                                    <p className="text-[10px] text-indigo-500 font-bold uppercase mb-0.5 leading-normal">科学再订货点 (ROP)</p>
+                                    <p className="text-lg font-extrabold text-indigo-900 font-mono">{Math.round(insight.reorderPoint)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
+                                  </div>
+                                </div>
+
+                                {/* Procurement advise card */}
+                                <div className="p-5 bg-gradient-to-br from-indigo-50 to-slate-50 rounded-2xl border border-indigo-100 text-center space-y-1 relative overflow-hidden">
+                                  <div className="absolute top-0 right-0 p-1 bg-indigo-600 text-white rounded-bl-lg text-[8px] uppercase tracking-wider font-extrabold">科学采购量</div>
+                                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">推荐备货采购数量</p>
+                                  <p className="text-3xl font-black text-indigo-700 font-mono tracking-tight">{insight.suggestedQuantity.toLocaleString()} <span className="text-xs font-bold">件</span></p>
+                                  <p className="text-[10px] font-medium text-slate-400 leading-normal">
+                                    支撑后续目标 {insight.targetCoverageDays} 天良性周转的建议净采购值
+                                  </p>
+                                </div>
+
+                                {/* Analytical advisory from AI */}
+                                <div className="space-y-2">
+                                  <div className="flex items-center gap-1.5 border-b border-slate-100 pb-2">
+                                    <BrainCircuit size={13} className="text-indigo-600" />
+                                    <span className="text-xs font-bold text-slate-800 tracking-wider uppercase">供应链全链路深度点评</span>
+                                  </div>
+                                  <div className="text-[11px] text-slate-600 leading-relaxed bg-slate-50 p-4 rounded-xl border border-slate-100 font-normal whitespace-pre-wrap">
+                                    {insight.explanation}
+                                  </div>
+                                </div>
+
+                                <div className="text-[9px] font-mono text-slate-400 flex justify-between">
+                                  <span>诊断源: {insight.explanation.includes("本地") ? "精密数学内核" : "DeepSeek 供应链模型"}</span>
+                                  <span>更新时间: {new Date(insight.analyzedAt).toLocaleTimeString()}</span>
+                                </div>
+                              </motion.div>
+                            ) : (
+                              <motion.div 
+                                key="none"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="p-8 text-center flex flex-col items-center justify-center space-y-4"
+                              >
+                                <div className="w-12 h-12 rounded-full bg-slate-50 text-slate-300 flex items-center justify-center border border-slate-100">
+                                  <BrainCircuit size={24} />
+                                </div>
+                                <div className="space-y-1">
+                                  <p className="font-bold text-slate-800 text-sm">点击 “AI 备货分析” 开始提报</p>
+                                  <p className="text-xs text-slate-400 max-w-[220px] mx-auto leading-relaxed">
+                                    系统将调取该 SKU 在该店铺下的所有历史趋势，精算安全库存防护墙、头程期运输安全及精准备货。
+                                  </p>
+                                </div>
+                                
+                                <div className="w-full bg-slate-50 border border-slate-100 rounded-xl p-4 text-left text-[11px] space-y-1.5">
+                                  <p className="font-bold text-slate-500 mb-1.5 uppercase text-[9px] tracking-wider">即时物理模型估算 (基于历史日均值):</p>
+                                  <div className="flex justify-between text-slate-600">
+                                    <span>历史日均销售速度:</span>
+                                    <span className="font-mono font-bold text-slate-800">{localAvg.toFixed(2)} 件/日</span>
+                                  </div>
+                                  <div className="flex justify-between text-slate-600">
+                                    <span>目标备货周转天数:</span>
+                                    <span className="font-mono font-bold text-indigo-600">{restockTargetDays} 天</span>
+                                  </div>
+                                  <div className="flex justify-between border-t border-slate-200 pt-1.5 mt-1 font-bold text-slate-800">
+                                    <span>本批建议备货量:</span>
+                                    <span className="font-mono text-indigo-700">{localReplenish} 件</span>
+                                  </div>
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div className="bg-slate-50 rounded-2xl p-8 text-center border-dashed border-2 border-slate-200 flex flex-col items-center justify-center text-slate-400 space-y-3">
+                      <Package size={36} className="text-slate-300 animate-pulse" />
+                      <p className="text-sm font-semibold text-slate-800">点选特定 SKU 进行备货诊断</p>
+                      <p className="text-xs max-w-[200px] leading-relaxed text-slate-400">
+                        点击列表任意行的 SKU 名字，或点击 “AI 备货分析” 即可拉起智能采购参谋看板。
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

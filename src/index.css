@@ -9,7 +9,40 @@
 @layer base {
   body {
     @apply antialiased bg-[#F1F5F9] text-slate-900;
+    font-size: 15.5px;
   }
+}
+
+/* Adjust all font scale utilities to be slightly larger for better readability */
+.text-\[9px\] {
+  font-size: 11px !important;
+}
+.text-\[10px\] {
+  font-size: 12px !important;
+}
+.text-\[11px\] {
+  font-size: 13px !important;
+}
+.text-xs {
+  font-size: 13.5px !important;
+}
+.text-sm {
+  font-size: 15.5px !important;
+}
+.text-base {
+  font-size: 17.5px !important;
+}
+.text-lg {
+  font-size: 19.5px !important;
+}
+.text-xl {
+  font-size: 22px !important;
+}
+.text-2xl {
+  font-size: 26px !important;
+}
+.text-3xl {
+  font-size: 32px !important;
 }
 
 .animate-spin-slow {
