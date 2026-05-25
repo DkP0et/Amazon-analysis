@@ -33,10 +33,63 @@ export default function App() {
   const [stores, setStores] = useState<Store[]>([]);
   const [activeStoreId, setActiveStoreId] = useState<string>("");
   const [skuPerformance, setSkuPerformance] = useState<Record<string, SKUPerformance>>({});
-  const [selectedSku, setSelectedSku] = useState<string | null>(null);
+  
+  // LocalStorage state wrappers to prevent loss on page-reload/HMR
+  const [selectedSku, _setSelectedSku] = useState<string | null>(() => {
+    return localStorage.getItem("amazon_merchant_selected_sku");
+  });
+  const setSelectedSku = (s: string | null | ((prev: string | null) => string | null)) => {
+    if (typeof s === 'function') {
+      _setSelectedSku(prev => {
+        const next = s(prev);
+        if (next) localStorage.setItem("amazon_merchant_selected_sku", next);
+        else localStorage.removeItem("amazon_merchant_selected_sku");
+        return next;
+      });
+    } else {
+      _setSelectedSku(s);
+      if (s) localStorage.setItem("amazon_merchant_selected_sku", s);
+      else localStorage.removeItem("amazon_merchant_selected_sku");
+    }
+  };
+
   const [selectedWeekIndex, setSelectedWeekIndex] = useState<number>(-1); // -1 means latest
-  const [view, setView] = useState<"upload" | "dashboard" | "inventory">("upload");
-  const [restockSku, setRestockSku] = useState<string | null>(null);
+  
+  const [view, _setView] = useState<"upload" | "dashboard" | "inventory">(() => {
+    const saved = localStorage.getItem("amazon_merchant_view");
+    return (saved === "upload" || saved === "dashboard" || saved === "inventory") ? saved : "upload";
+  });
+  const setView = (v: "upload" | "dashboard" | "inventory" | ((prev: "upload" | "dashboard" | "inventory") => "upload" | "dashboard" | "inventory")) => {
+    if (typeof v === 'function') {
+      _setView(prev => {
+        const next = v(prev);
+        localStorage.setItem("amazon_merchant_view", next);
+        return next;
+      });
+    } else {
+      _setView(v);
+      localStorage.setItem("amazon_merchant_view", v);
+    }
+  };
+
+  const [restockSku, _setRestockSku] = useState<string | null>(() => {
+    return localStorage.getItem("amazon_merchant_restock_sku");
+  });
+  const setRestockSku = (s: string | null | ((prev: string | null) => string | null)) => {
+    if (typeof s === 'function') {
+      _setRestockSku(prev => {
+        const next = s(prev);
+        if (next) localStorage.setItem("amazon_merchant_restock_sku", next);
+        else localStorage.removeItem("amazon_merchant_restock_sku");
+        return next;
+      });
+    } else {
+      _setRestockSku(s);
+      if (s) localStorage.setItem("amazon_merchant_restock_sku", s);
+      else localStorage.removeItem("amazon_merchant_restock_sku");
+    }
+  };
+
   const [restockTargetDays, setRestockTargetDays] = useState<number>(60);
   const [isRestockLoading, setIsRestockLoading] = useState<boolean>(false);
   const [savingSku, setSavingSku] = useState<string | null>(null);
@@ -2615,8 +2668,56 @@ export default function App() {
 
                               showToast(`⚡ ${skuPerf.sku} AI供应链备货模型解析成功！`);
                             } catch (err) {
-                              console.error(err);
-                              showToast("❌ 智能备货模型运算失败，请重试");
+                              console.warn("AI restock analyze failed, falling back to client-side local calculation:", err);
+                              
+                              // Calculate scientific supply chain metrics locally
+                              const history = skuPerf.history || [];
+                              const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
+                              const totalDays = history.length * 7;
+                              const avgDailySales = totalDays > 0 ? Math.max(0.01, Number((totalOrders / totalDays).toFixed(2))) : 1;
+                              const leadTimeDays = skuWithParams.leadTimeDays;
+                              const safetyStockDays = skuWithParams.safetyStockDays;
+                              const currentStock = skuWithParams.currentStock;
+                              const inTransitStock = skuWithParams.inTransitStock;
+
+                              const leadTimeDemand = Number((avgDailySales * leadTimeDays).toFixed(2));
+                              const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
+                              const reorderPoint = Number((leadTimeDemand + safetyStock).toFixed(2));
+                              const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + inTransitStock) / avgDailySales).toFixed(1)) : 999;
+                              const suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - currentStock - inTransitStock));
+
+                              const fallbackResult = {
+                                avgDailySales,
+                                leadTimeDemand,
+                                safetyStock,
+                                reorderPoint,
+                                daysOfSupply,
+                                suggestedQuantity,
+                                targetCoverageDays: restockTargetDays,
+                                explanation: `[提示：AI 接口暂时繁忙/本地运行中，系统已自动转换为本地精密物理备货模型运算]
+
+科学备货详情诊断报告：
+1. 【日周转速度】：该 SKU 历史累计销量为 ${totalOrders} 件，科学折算最近平均日销量（Average Daily Sales）为 ${avgDailySales.toFixed(2)} 件/天。
+2. 【头程期消耗】：当前配置采购与派送头程 (Lead Time) 天数为 ${leadTimeDays} 天，对应整个运输期的必需库存周转量为 ${leadTimeDemand} 件。
+3. 【安全容错层】：设置了 ${safetyStockDays} 天安全天数备份（用于对冲船期延误、厂家排产延迟等异常），安全备用基水位为 ${safetyStock} 件。
+4. 【触发采购水位】：安全触发线（ROP）为 ${reorderPoint} 件（头程期消耗 + 安全备用库存）。当前在库实体 ${currentStock} 件，加上在途在运 ${inTransitStock} 件，若总存量低于 ROP 则代表随时有缺货断档之忧，需要尽快安排采购！
+5. 【存量维持周期】：实物现货加上在途在运总存量为 ${currentStock + inTransitStock} 件，以当前的平均订单流速，大约可维持运营支撑 ${daysOfSupply} 天。
+6. 【补运订购计划】：针对您设定的目标周转期 ${restockTargetDays} 天，扣减完当前已有水位，本批次为您测算的最佳补货量精密推荐计为 ${suggestedQuantity} 件。能够在保证周转平滑、杜绝断缺的同时，降低多余的占用流动资金与长期配仓积压费用。`,
+                                analyzedAt: new Date().toISOString()
+                              };
+
+                              setSkuPerformance(prev => {
+                                const next = { ...prev };
+                                next[skuPerf.sku] = {
+                                  ...next[skuPerf.sku],
+                                  ...skuWithParams,
+                                  restockInsight: fallbackResult
+                                };
+                                skuService.saveSku(next[skuPerf.sku]);
+                                return next;
+                              });
+
+                              showToast(`⚠️ AI 线路繁忙，系统已无缝切换至本地物理备货模型！`);
                             } finally {
                               setIsRestockLoading(false);
                             }
@@ -2665,11 +2766,12 @@ export default function App() {
 
                                 {/* Current On-hand Stock */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                  <div className="inline-flex items-center gap-1">
                                     <input 
                                       type="number" 
                                       defaultValue={currentStock} 
                                       onBlur={(e) => handleInstantSaveField(s, 'currentStock', parseInt(e.target.value) || 0)}
+                                      onClick={(e) => e.stopPropagation()}
                                       className="w-16 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center font-semibold text-slate-800 outline-none text-xs"
                                     />
                                     {savingSku === `${s.sku}_currentStock` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
@@ -2678,11 +2780,12 @@ export default function App() {
 
                                 {/* In transit stock */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                  <div className="inline-flex items-center gap-1">
                                     <input 
                                       type="number" 
                                       defaultValue={inTransitStock} 
                                       onBlur={(e) => handleInstantSaveField(s, 'inTransitStock', parseInt(e.target.value) || 0)}
+                                      onClick={(e) => e.stopPropagation()}
                                       className="w-16 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center font-semibold text-slate-800 outline-none text-xs"
                                     />
                                     {savingSku === `${s.sku}_inTransitStock` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
@@ -2691,11 +2794,12 @@ export default function App() {
 
                                 {/* Lead Time Days */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                  <div className="inline-flex items-center gap-1">
                                     <input 
                                       type="number" 
                                       defaultValue={leadTimeDays} 
                                       onBlur={(e) => handleInstantSaveField(s, 'leadTimeDays', parseInt(e.target.value) || 0)}
+                                      onClick={(e) => e.stopPropagation()}
                                       className="w-12 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center text-slate-600 outline-none text-xs"
                                     />
                                     {savingSku === `${s.sku}_leadTimeDays` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
@@ -2704,11 +2808,12 @@ export default function App() {
 
                                 {/* Safety Stock Days */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                  <div className="inline-flex items-center gap-1">
                                     <input 
                                       type="number" 
                                       defaultValue={safetyStockDays} 
                                       onBlur={(e) => handleInstantSaveField(s, 'safetyStockDays', parseInt(e.target.value) || 0)}
+                                      onClick={(e) => e.stopPropagation()}
                                       className="w-12 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center text-slate-600 outline-none text-xs"
                                     />
                                     {savingSku === `${s.sku}_safetyStockDays` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
@@ -2728,7 +2833,7 @@ export default function App() {
                                 </td>
 
                                 {/* Action trigger */}
-                                <td className="py-4 px-4 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                                <td className="py-4 px-4 text-right whitespace-nowrap">
                                   <div className="flex justify-end items-center gap-1.5">
                                     {isBelowROP ? (
                                       <span className="text-[10px] font-bold bg-amber-500/10 text-amber-600 px-1.5 py-0.5 rounded border border-amber-500/20 mr-1 text-center" title={`科学安全水位再订货点: ${reorderPoint.toFixed(0)}件`}>
@@ -2740,7 +2845,10 @@ export default function App() {
                                       </span>
                                     )}
                                     <button 
-                                      onClick={() => handleRestockAnalyze(s)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleRestockAnalyze(s);
+                                      }}
                                       className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-[11px] rounded-lg shadow-sm hover:shadow-xs transition-all flex items-center gap-1 shrink-0"
                                       title="结合采购头程与销售流速进行AI供应链补货精确数学测算"
                                     >
