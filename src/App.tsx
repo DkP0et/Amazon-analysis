@@ -128,7 +128,7 @@ export default function App() {
   };
 
   const handleSaveRemark = () => {
-    if (!selectedSku) return;
+    if (!selectedSku || !skuPerformance[selectedSku]) return;
     setSkuPerformance(prev => {
       const next = { ...prev };
       next[selectedSku] = {
@@ -712,7 +712,7 @@ export default function App() {
   };
 
   const handleAdoptRecommendation = (recommendationText: string) => {
-    if (!selectedSku) return;
+    if (!selectedSku || !skuPerformance[selectedSku]) return;
     
     // Guess type based on chinese keywords
     let type: 'PRICING' | 'ADVERTISING' | 'LISTING_OPTIMIZATION' | 'REPLENISHMENT' | 'PROMOTION' | 'OTHER' = 'OTHER';
@@ -1687,7 +1687,7 @@ export default function App() {
 
                 {/* AI Insight Sidebar Dashboard View */}
                 <div className="lg:col-span-4 space-y-6 flex flex-col h-full overflow-hidden">
-                  {selectedSku ? (
+                  {selectedSku && skuPerformance[selectedSku] ? (
                     <AnimatePresence mode="wait">
                       <motion.div 
                         key={selectedSku}

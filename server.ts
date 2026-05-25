@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import { GoogleGenAI } from "@google/genai";
 import { readDb, writeDb } from "./server/db";
+import fs from "fs";
 
 dotenv.config();
 
@@ -459,13 +460,18 @@ async function startServer() {
   });
 
   // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  const isProduction = process.env.NODE_ENV === "production";
+  const hasDist = fs.existsSync(path.join(process.cwd(), "dist"));
+
+  if (!isProduction || !hasDist) {
+    console.log(`[Server] Starting in DEVELOPMENT mode (Vite Middleware) - NODE_ENV: ${process.env.NODE_ENV}, hasDist: ${hasDist}`);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
+    console.log("[Server] Starting in PRODUCTION mode (Serving static dist)");
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
