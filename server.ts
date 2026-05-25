@@ -28,6 +28,10 @@ async function generateAIChatCompletion(systemInstruction: string, prompt: strin
     try {
       const apiBase = process.env.DEEPSEEK_API_BASE || "https://api.deepseek.com/v1";
       const apiModel = process.env.DEEPSEEK_API_MODEL || "deepseek-chat";
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
+      
       const response = await fetch(`${apiBase}/chat/completions`, {
         method: "POST",
         headers: {
@@ -42,8 +46,11 @@ async function generateAIChatCompletion(systemInstruction: string, prompt: strin
           ],
           response_format: { type: "json_object" },
           temperature: 0.3
-        })
+        }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
+
       if (response.ok) {
         const data = await response.json();
         const content = data.choices?.[0]?.message?.content;
@@ -74,7 +81,7 @@ async function generateAIChatCompletion(systemInstruction: string, prompt: strin
     }
   });
 
-  const response = await ai.models.generateContent({
+  const geminiCall = ai.models.generateContent({
     model: "gemini-3.5-flash",
     contents: prompt,
     config: {
@@ -83,6 +90,12 @@ async function generateAIChatCompletion(systemInstruction: string, prompt: strin
       temperature: 0.3
     }
   });
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("Gemini API 响应超时（15秒）")), 15000);
+  });
+
+  const response = await Promise.race([geminiCall, timeoutPromise]);
 
   const content = response.text;
   if (!content) {
