@@ -60,6 +60,7 @@ export interface AIInsight {
   pros: string[];
   cons: string[];
   recommendations: string[];
+  provider?: string;
   // Robust funnel attribution diagnostics computed by server
   attribution?: {
     sessionsBase: number;

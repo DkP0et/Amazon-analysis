@@ -692,7 +692,7 @@ export default function App() {
             currentStock: skuPerformance[sku].currentStock,
             history,
             attribution: attributionResult
-          } 
+          }
         }),
       });
       
@@ -1673,6 +1673,7 @@ export default function App() {
                             
                             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none">Listing 核心分析</p>
                           </div>
+                          
                           <button 
                             onClick={() => analyzeSku(selectedSku)}
                             disabled={skuPerformance[selectedSku].analysisLoading}
