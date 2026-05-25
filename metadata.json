@@ -1,0 +1,6 @@
+{
+  "name": "亚马逊卖家 AI 分析师",
+  "description": "一个智能直观的亚马逊卖家仪表盘，用于分析每周销售和库存报告，提供 AI 驱动的 SKU 洞察和可视化。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
