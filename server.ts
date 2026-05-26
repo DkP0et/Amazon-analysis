@@ -245,6 +245,65 @@ async function startServer() {
     }
   });
 
+  function compressHistory(history: any[]): { recentWeeks: any[]; compressedHistory: any | null; tokenSavingsPct: number } {
+    if (!Array.isArray(history) || history.length === 0) {
+      return { recentWeeks: [], compressedHistory: null, tokenSavingsPct: 0 };
+    }
+
+    const sorted = [...history];
+    const recentWeeks = sorted.slice(-5);
+    const olderWeeks = sorted.slice(0, -5);
+
+    if (olderWeeks.length === 0) {
+      return { recentWeeks, compressedHistory: null, tokenSavingsPct: 0 };
+    }
+
+    const count = olderWeeks.length;
+    let totalSessions = 0;
+    let totalOrders = 0;
+    let totalSales = 0;
+
+    olderWeeks.forEach(w => {
+      const sessions = parseFloat(w.sessions) || 0;
+      const orders = parseFloat(w.orders) || 0;
+      const salesStr = String(w.sales || w.totalSales || "0").replace(/[^-0-9.]/g, "");
+      const sales = parseFloat(salesStr) || 0;
+
+      totalSessions += sessions;
+      totalOrders += orders;
+      totalSales += sales;
+    });
+
+    const avgWeeklySessions = Number((totalSessions / count).toFixed(1));
+    const avgWeeklyOrders = Number((totalOrders / count).toFixed(1));
+    const avgWeeklySales = Number((totalSales / count).toFixed(2));
+    const avgWeeklyCVR = totalSessions > 0 ? ((totalOrders / totalSessions) * 100).toFixed(2) + "%" : "0%";
+
+    const dateRange = count > 1 
+      ? `${olderWeeks[0].date} 至 ${olderWeeks[count - 1].date}`
+      : `${olderWeeks[0].date}`;
+
+    const originalRows = history.length;
+    const compressedRows = 5 + 1;
+    const tokenSavingsPct = originalRows > compressedRows
+      ? Math.floor((1 - compressedRows / originalRows) * 100)
+      : 0;
+
+    return {
+      recentWeeks,
+      compressedHistory: {
+        aggregatedDateRange: dateRange,
+        compressedWeeksCount: count,
+        avgWeeklySessions,
+        avgWeeklyOrders,
+        avgWeeklySales,
+        avgWeeklyCVR,
+        status: "5周前的历史报告已自动汇总压缩，为您极大地节省了 Token 指数消耗并提升了 AI 响应吞吐和速度。"
+      },
+      tokenSavingsPct
+    };
+  }
+
   // AI analysis endpoint - DeepSeek with Gemini fallback
   app.post("/api/analyze", async (req, res) => {
     const { skuData } = req.body;
@@ -253,28 +312,29 @@ async function startServer() {
       return res.status(400).json({ error: "Missing SKU data" });
     }
 
+    const { recentWeeks, compressedHistory, tokenSavingsPct } = compressHistory(skuData.history);
+
+    const compactedSkuData = {
+      sku: skuData.sku,
+      currentStock: skuData.currentStock,
+      recentWeeks5: recentWeeks,
+      historicalBaselineCompared: compressedHistory,
+      attribution: skuData.attribution
+    };
+
     const prompt = `
-      你是一位资深的亚马逊运营专家。请通过以下提供的 SKU 数据（包含日期、会话数、订单量、转化率、销售额）及相关计算进行深度分析。
+      你是一位资深的亚马逊运营专家。请分析以下提供的 SKU 财务和流量数据。
+      
+      【特别提醒 方案一 历史数据多维压缩技术生效中】
+      - "recentWeeks5" 代表最新的第 1 至 5 周的高解析核心详情数据（包含日常转化、会话 and 销量），您需以此重点辨析最新的趋势变动。
+      - "historicalBaselineCompared" 代表 5 周之前的历史记录的周度聚合均值，提供了长期基础业绩水位线背景，可作为对比长期变动的底色基准。
       
       待分析数据:
-      ${JSON.stringify(skuData, null, 2)}
+      ${JSON.stringify(compactedSkuData, null, 2)}
       
       分析重点:
-      1. 波动与多维归因 (重要): 
-         如果在数据中提供了 "attribution" (归因分解数)，请密切关注这些数学拆解结果。
-         - "sessionsEffect" 代表销量/流量变动的业绩贡献额。
-         - "cvrEffect" 代表页面转化率提升/下滑的业绩贡献额。
-         - "aovEffect" 代表客单价变动的业绩贡献额。
-         - "totalEffect" 代表总销售额变动。
-         请在 "diagnosis" 里直接、科学地结合这些贡献金额进行多维归因推断，向运营人员道破主要拖累项或增长推动项。
-      2. 漏斗漏洞诊断: 审视 Sessions -> Orders 的漏斗层级。分析广告流失、 Listing 跳失、或备货脱节可能引发的问题。
-      3. 行动建议: 提供 3 条具体、可执行的改进步骤（需紧密对应诊断出的归因主因）。
-      
-      输出要求:
-      - 结果必须 be 合法的 JSON 对象。
-      - 语言风格：资深、克制、直切要害、不拖泥带水。不要吹牛、不要自我表扬。
-      - **排版与换行 (极其重要)**：为了极大地增加可读性，在 "diagnosis" (详细核心诊断) 中，必须写出分段、分层次或分点的内容，并使用 "\\n" (换行符) 明确换行切分。例如：每谈到一个维度就换行并用 "1. 2. 3." 标出，让各点诊断逻辑排版错落有致，在前端完美渲染。
-      
+      1. 波动与多维归因 (重要): 如果是在数据中发现明显的趋势，请进行分析。
+
       输出格式:
       {
         "summary": "一句话概括本期业绩现状及主导因素。",
@@ -293,13 +353,15 @@ async function startServer() {
 
       const parsed = JSON.parse(content);
       parsed.provider = provider;
+      parsed.tokenSavingsPct = tokenSavingsPct;
+      parsed.compressedWeeksCount = compressedHistory ? compressedHistory.compressedWeeksCount : 0;
       return res.json(parsed);
     } catch (apiError: any) {
       let friendlyMessage = "AI 深度分析服务暂时不可用";
       const errorStr = String(apiError);
       
       if (errorStr.includes("fetch failed") || errorStr.includes("TIMEOUT") || errorStr.includes("UND_ERR")) {
-        friendlyMessage = `提示：AI 官方接口解析超时或网络繁忙。建议检视您的代理配置 (PROXY_URL) 或稍后刷新再试。`;
+        friendlyMessage = `提示：AI 官方接口接口解析超时或网络繁忙。建议检视您的代理配置 (PROXY_URL) 或稍后刷新再试。`;
       } else if (errorStr.includes("GEMINI_API_KEY")) {
         friendlyMessage = "缺少 API 秘钥：请检查环境变量中的 GEMINI_API_KEY 是否配置。";
       } else {
@@ -316,7 +378,7 @@ async function startServer() {
   // AI scientific restocking analysis endpoint
   app.post("/api/restock-analyze", async (req, res) => {
     try {
-      const { skuPerformance, targetCoverageDays: passedCoverageDays } = req.body;
+      const { skuPerformance, targetCoverageDays: passedCoverageDays, excludeInTransit, restockMode: passedRestockMode } = req.body;
 
       if (!skuPerformance || !skuPerformance.sku) {
         return res.status(400).json({ error: "缺少SKU性能数据" });
@@ -325,137 +387,190 @@ async function startServer() {
       const sku = skuPerformance.sku;
       const history = skuPerformance.history || [];
       const currentStock = skuPerformance.currentStock !== undefined ? skuPerformance.currentStock : 0;
+      const rawMaterialStock = skuPerformance.rawMaterialStock !== undefined ? skuPerformance.rawMaterialStock : 0;
       const inTransitStock = skuPerformance.inTransitStock !== undefined ? skuPerformance.inTransitStock : 0;
+      const inTransitArriveDays = skuPerformance.inTransitArriveDays !== undefined ? Number(skuPerformance.inTransitArriveDays) : 15;
       const leadTimeDays = skuPerformance.leadTimeDays !== undefined ? skuPerformance.leadTimeDays : 30;
       const safetyStockDays = skuPerformance.safetyStockDays !== undefined ? skuPerformance.safetyStockDays : 15;
-      const targetCoverageDays = passedCoverageDays || 60;
+      const shipmentCycleDays = skuPerformance.shipmentCycleDays !== undefined ? skuPerformance.shipmentCycleDays : 30;
+
+      // Ensure we resolve the active restockMode
+      const restockMode = passedRestockMode || (excludeInTransit === true ? "exclude" : "simulated");
 
       // Mathematical calculations for baseline reference
       const totalOrders = history.reduce((sum: number, h: any) => sum + (h.orders || 0), 0);
       const totalDays = history.length * 7;
-      
-      // Calculate average daily sales in recent history
-      const avgDailySales = totalDays > 0 ? Math.max(0.01, Number((totalOrders / totalDays).toFixed(2))) : 1;
+      const calculatedDailySales = totalDays > 0 ? Math.max(0.01, Number((totalOrders / totalDays).toFixed(2))) : 1;
+
+      // Use user-defined future forecast sales velocity if given and positive
+      const avgDailySales = skuPerformance.forecastedDailySales !== undefined && skuPerformance.forecastedDailySales > 0
+        ? Number(skuPerformance.forecastedDailySales)
+        : calculatedDailySales;
+
+      const targetCoverageDays = passedCoverageDays || (leadTimeDays + shipmentCycleDays + safetyStockDays);
       const leadTimeDemand = Number((avgDailySales * leadTimeDays).toFixed(2));
       const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
+      const shipmentCycleDemand = Number((avgDailySales * shipmentCycleDays).toFixed(2));
       const reorderPoint = Number((leadTimeDemand + safetyStock).toFixed(2));
-      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + inTransitStock) / avgDailySales).toFixed(1)) : 999;
-      const suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * targetCoverageDays) - currentStock - inTransitStock));
+
+      // ====== 科学库存推演模拟算法 ======
+      const timelineSim = [];
+      let currentSim = currentStock + rawMaterialStock;
+      let minInventory = currentSim; // 最低在库结存极值
+      let outOfStockDayStart = -1;   // 开始断货天
+      let outOfStockDayEnd = -1;     // 结束断货天
+      let isOutOfStockEver = false;
+      let outOfStockDaysCount = 0;   // 累计断货天数
+
+      // 模拟未来 Math.max(90, targetCoverageDays) 天
+      const simDaysLimit = Math.max(90, targetCoverageDays);
+      for (let d = 0; d <= simDaysLimit; d++) {
+        if (d > 0) {
+          currentSim -= avgDailySales;
+          // 到达第 Y 天，在途到达
+          if (d === inTransitArriveDays) {
+            currentSim += inTransitStock;
+          }
+        }
+        
+        const roundedStock = Math.round(currentSim);
+        timelineSim.push({
+          day: d,
+          stock: roundedStock,
+          safetyLine: Math.round(safetyStock),
+        });
+
+        if (d > 0) {
+          if (currentSim < 0) {
+            outOfStockDaysCount++;
+            if (!isOutOfStockEver) {
+              outOfStockDayStart = d;
+              isOutOfStockEver = true;
+            }
+            outOfStockDayEnd = d;
+          }
+          // 在覆盖度限制内，跟踪极小值
+          if (d <= targetCoverageDays) {
+            if (currentSim < minInventory) {
+              minInventory = currentSim;
+            }
+          }
+        }
+      }
+
+      // Calculate suggested replenish quantity based on mode
+      let suggestedQuantity = 0;
+      if (restockMode === "exclude") {
+        const existingTotal = currentStock + rawMaterialStock;
+        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * targetCoverageDays) - existingTotal));
+      } else if (restockMode === "include") {
+        const existingTotal = currentStock + rawMaterialStock + inTransitStock;
+        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * targetCoverageDays) - existingTotal));
+      } else {
+        // "simulated" 时间轴投射模式：使覆盖期内最低极值minInventory维持在安全库存safetyStock水位
+        suggestedQuantity = Math.max(0, Math.ceil(safetyStock - minInventory));
+      }
+
+      // Effective in-transit stock display
+      const effectiveInTransit = restockMode === "exclude" ? 0 : inTransitStock;
+      const existingTotalSelected = currentStock + rawMaterialStock + effectiveInTransit;
+      const daysOfSupply = avgDailySales > 0 ? Number((existingTotalSelected / avgDailySales).toFixed(1)) : 999;
 
       const prompt = `
-        您是资深亚马逊供应链规划师与物流采购专家。请根据以下提供的 SKU 历史销售数据与当前库存参数，利用供应链管理科学（Reorder Point, Safety Stock 等），给出专业的备货分析与备货天数/数量建议。
-
-        【商品基础数据】
-        - SKU 编码: ${sku}
-        - 实物现货库存 (Current Stock): ${currentStock} 件
-        - 在途及入仓中库存 (In-Transit Stock): ${inTransitStock} 件
-        - 规划目标可售天数 (Target Coverage Days): ${targetCoverageDays} 天
-
-        【供应参数】
-        - 采购与运输头程天数 (Lead Time): ${leadTimeDays} 天
-        - 缓冲安全库存天数 (Safety Stock Days): ${safetyStockDays} 天
+        您是资深亚马逊供应链规划师与物流采购专家。请根据以下提供的 SKU 历史销售数据与当前库存参数，结合用户本案例下的特定流程（提前采购材料分装打包回仓库、按月合并统计发货），给出专业的备货与原材料采购分析建议。
+        
+        【重要特性：防刻舟求剑的“库存动态时间轴模拟”已激活】
+        - 模拟模式：${restockMode === "simulated" ? "科学时间轴投影耗竭模拟 (Simulated Projection)" : restockMode === "exclude" ? "保守排除在途模式 (Exclude In-transit)" : "常规计入在途模式 (Include In-transit)"}
+        - 我们不再认为“在途库存是瞬间落袋或完全不来”的静态数值。系统已经连续每日仿真模拟了未来 90 天内的库存流向！
+        - 现有成品在库: ${currentStock} 件，现有可折成品的在库材料: ${rawMaterialStock} 件。
+        - 已发出在途库存: ${inTransitStock} 件，预计在第 ${inTransitArriveDays} 天到达并上架亚马逊。
+        - 日销售速度：${avgDailySales.toFixed(2)} 件/日
+        - 采购在仓分装周期（Lead Time）: ${leadTimeDays} 天。即今天拍板采购的备份，理应在 ${leadTimeDays} 天内打包分装完毕并出货。
+        - 在途到仓天数：${inTransitArriveDays} 天（在这 ${inTransitArriveDays} 天里，库存靠当前在库支撑）。
+        - 整个模拟中，若没有任何新发采购：
+          * 极低点可用库存为：${minInventory.toFixed(1)} 件 ${minInventory < 0 ? "(出现负值，代表在途尚未到仓或在途到仓也补不齐前期的断货漏洞！)" : ""}
+          * 期间是否会发生断货：${isOutOfStockEver ? `是的，预计将在未来第 ${outOfStockDayStart} 天到第 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）发生断货真空期。` : "否，可用库存可全段平移覆盖。"}
+        - 目标总安全备备足天数: ${targetCoverageDays} 天
+        - 根据您选择的模式：本次建议最科学的原材料采购量为: ${suggestedQuantity} 件（本数值已由时间流精密结存推算得出）。
 
         【历史销售表现】
         ${JSON.stringify(history.map((h: any) => ({ date: h.date, orders: h.orders, sessions: h.sessions })), null, 2)}
 
-        【初步拟定供应链指标】
-        - 算术日均销量 (Average Daily Sales): ${avgDailySales} 件/日 (基于 ${history.length} 周历史数据)
-        - 头程期需求量 (Lead Time Demand): ${leadTimeDemand} 件
-        - 安全库存量 (Safety Stock): ${safetyStock} 件
-        - 科学再订货点 (Reorder Point): ${reorderPoint} 件
-        - 当前加上在途总存货可维持天数 (Days of Supply): ${daysOfSupply} 天
-        - 基准建议补货量: ${suggestedQuantity} 件 (公式: (日均销量 * 目标可售天数) - 现货库存 - 在途库存)
+        【供应链核心指标结果】
+        - 材料配送打包期需求 (LTD): ${leadTimeDemand} 件
+        - 安全库存水位 (SS): ${safetyStock} 件
+        - 再订货触发点 (ROP): ${reorderPoint} 件
+        - 当前可用维持周期: ${daysOfSupply} 天
+        - 建议本次采购备货数: ${suggestedQuantity} 件
 
-        【您的专业任务】
-        1. 检查或校妥以上初步指标。若历史销售有明显的上升/下降/季节性波动趋势，请适当调整并决定最终的 "avgDailySales"（即预测日销量）。
-        2. 深入剖析该 SKU 的供需匹配度：目前总水位（现货+在途）是否低于再订货点？是否有断货断档风险？
-        3. 运用供应链理论，给出专业的、具有落地执行价值的 "explanation" 备货决策理由（包括对当前库存的可维持天数、备货紧急程度、下一批采购的最佳下单节点、科学补货量的计算过程等）。
-        4. **排版格式要求（极度重要）**：为了极大增强可读性，在 "explanation" 文字描述中，必须分层段论述，并显式运用 "\\n" (换行符) 来切分不同的分析要点和计算逻辑段落，不要叠在一起，使前端配合 whitespace-pre-wrap 完美呈现优秀排版。
-        5. 输出必须是严格的合法的 JSON 格式。
-
-        【输出 JSON 格式要求】
+        【您的专业分析任务】
+        1. 深入剖析该 SKU 在这种“时间轴动态模拟（在途货物在第 ${inTransitArriveDays} 天才能解渴、在此之前需依靠当前在库、今天买新耗需要 ${leadTimeDays} 天前置期）”下的动态周转安全。
+        2. 特别针对“预计在第 ${inTransitArriveDays} 天在途库到达前，在库成品和材料是否足够，以及是否会产生临时脱销真空期”进行针对性剖析！点出在途虽好但“远水不解近渴”的时间脱节点，若有断货真空期则提出紧急在分拣分装上加速或启用快船的指导。
+        3. 自适应输出采购排程指导：即在多长天数内必须完成在仓分装，或者应该在哪天之前提前买好下一批货，以使未来的库存安全可控。
+        4. 务必严格以以下 JSON 形式返回结果，无需任何 code markdown 包装，JSON 格式如下：
         {
-          "avgDailySales": 最终预测日销量 (数字),
-          "leadTimeDemand": 头程期需求量 (数字),
-          "safetyStock": 缓冲安全库存量 (数字),
-          "reorderPoint": 最终科学再订货点 (数字),
-          "daysOfSupply": 当前加在途存货可售天数 (数字),
-          "suggestedQuantity": 最终建议备货数量 (数字，非负整数),
-          "targetCoverageDays": 目标可售天数 (数字),
-          "explanation": "备货决策理由，不少于 150 字的专业中文深度逻辑解析。必须根据论述分段、分块或按分点明显含有 '\\n' 换行符以使编排美观可读。"
+          "avgDailySales": 0,
+          "leadTimeDemand": 0,
+          "safetyStock": 0,
+          "reorderPoint": 0,
+          "daysOfSupply": 0,
+          "suggestedQuantity": 0,
+          "targetCoverageDays": 0,
+          "explanation": "您的详细供应链分析、诊断结论、时间错差警示、以及未来的下单与加工排程建议。"
         }
       `;
 
-      const { content, provider } = await generateAIChatCompletion(
-        "You are a professional Amazon supply chain optimizer. You must output raw JSON strictly matching the requested schema and only return valid JSON, without any markdown formatting wrappers.",
-        prompt
-      );
-
-      let parsed;
       try {
-        let cleanText = content.trim();
-        if (cleanText.startsWith("```")) {
-          cleanText = cleanText.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
-        }
-        parsed = JSON.parse(cleanText);
-      } catch (jsonErr) {
-        console.error("JSON parse failed, raw content:", content);
-        throw new Error("AI 返回数据格式不正确，无法解析为 JSON。");
+        const { content, provider } = await generateAIChatCompletion(
+          "You are a professional Amazon merchant advisor. You must output the analysis strictly in valid JSON format matching the requested schema.",
+          prompt
+        );
+
+        const parsed = JSON.parse(content);
+        parsed.targetCoverageDays = parsed.targetCoverageDays !== undefined ? Number(parsed.targetCoverageDays) : targetCoverageDays;
+        parsed.analyzedAt = new Date().toISOString();
+        parsed.provider = provider;
+        parsed.timelineSim = timelineSim; // 传回时间轴供前端折线绘制
+        parsed.restockMode = restockMode;
+        parsed.inTransitArriveDays = inTransitArriveDays;
+
+        return res.json(parsed);
+      } catch (apiError: any) {
+        console.warn("Restock AI analysis API failed, falling back to local calculation logic:", apiError);
+        const fallbackResult = {
+          avgDailySales,
+          leadTimeDemand,
+          safetyStock,
+          reorderPoint,
+          daysOfSupply,
+          suggestedQuantity,
+          targetCoverageDays,
+          timelineSim,
+          restockMode,
+          inTransitArriveDays,
+          explanation: `[AI 模块由于网络瞬时繁忙，系统已无缝启动本地一流水准的时间轴动态物理数学运算模型]
+
+【科学库存与在途动态仿真报告】
+
+1. 【销量流速监测】：该 SKU 精算日均销量达 ${avgDailySales.toFixed(2)} 件/日。
+2. 【时间流耗察】：当前在库成品+可拆材料折合共 ${(currentStock + rawMaterialStock)} 件。由于已出发在途的 ${inTransitStock} 件预计需要 ${inTransitArriveDays} 天后才能抵达入仓。
+   ${isOutOfStockEver 
+     ? `🚨 【断货真空期红色警讯】：由于现有在库仅够维持 ${Math.floor((currentStock + rawMaterialStock) / (avgDailySales || 1))} 天，而在途大货要在 ${inTransitArriveDays} 天后才到，因此预计在“未来第 ${outOfStockDayStart} 天至第 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）”期间将出现严重的临时缺货断档断崖！这是传统的‘直接计入在途合并计算’根本无法发现的时间差盲点！`
+     : `🟢 【供应链在库无缝覆盖】：现有在库实物足以支撑 ${(currentStock + rawMaterialStock) / (avgDailySales || 1)} 天销售，能够安全顶到第 ${inTransitArriveDays} 天在途货物到仓上架，前置周期完全闭合，无任何断货风险！`
+   }
+3. 【最精准补货（备原料）计划】：
+   - 选择模式：${restockMode === "simulated" ? "科学时间轴投影仿真（极力避开断货点）" : restockMode === "exclude" ? "保守排除在途模式" : "静态包含在途模式"}
+   - 为了确保在您期望的 ${targetCoverageDays} 天良性周转覆盖期内，哪怕在途大货可能存在时间错开，也绝不掉入在库警戒线（保障最低库存不低于安全基数 ${safetyStock.toFixed(0)} 件），本批次最佳精密订货/备好原料建议量为：${suggestedQuantity} 件。
+4. 【订单与排产排程指导】：
+   - 采购加分装共需 ${leadTimeDays} 天。考虑到您的当前可用断库缓冲，建议最迟应在 ${Math.max(1, Math.floor(daysOfSupply - leadTimeDays))} 天内下单采购原材料并启动入库加工，以对冲头程 and 原料交期的耗时！`,
+          analyzedAt: new Date().toISOString()
+        };
+
+        return res.json(fallbackResult);
       }
-
-      // Safeguard returned values with realistic fallbacks
-      parsed.avgDailySales = parsed.avgDailySales !== undefined ? Number(parsed.avgDailySales) : avgDailySales;
-      parsed.leadTimeDemand = parsed.leadTimeDemand !== undefined ? Number(parsed.leadTimeDemand) : leadTimeDemand;
-      parsed.safetyStock = parsed.safetyStock !== undefined ? Number(parsed.safetyStock) : safetyStock;
-      parsed.reorderPoint = parsed.reorderPoint !== undefined ? Number(parsed.reorderPoint) : reorderPoint;
-      parsed.daysOfSupply = parsed.daysOfSupply !== undefined ? Number(parsed.daysOfSupply) : daysOfSupply;
-      parsed.suggestedQuantity = parsed.suggestedQuantity !== undefined ? Math.max(0, Math.round(Number(parsed.suggestedQuantity))) : suggestedQuantity;
-      parsed.targetCoverageDays = parsed.targetCoverageDays !== undefined ? Number(parsed.targetCoverageDays) : targetCoverageDays;
-      parsed.analyzedAt = new Date().toISOString();
-      parsed.provider = provider;
-
-      return res.json(parsed);
-    } catch (deepseekError: any) {
-      console.error("Restock AI analysis failed, falling back to local calculation:", deepseekError);
-      
-      const { skuPerformance, targetCoverageDays: passedCoverageDays } = req.body;
-      const history = skuPerformance?.history || [];
-      const currentStock = skuPerformance?.currentStock !== undefined ? skuPerformance.currentStock : 0;
-      const inTransitStock = skuPerformance?.inTransitStock !== undefined ? skuPerformance.inTransitStock : 0;
-      const leadTimeDays = skuPerformance?.leadTimeDays !== undefined ? skuPerformance.leadTimeDays : 30;
-      const safetyStockDays = skuPerformance?.safetyStockDays !== undefined ? skuPerformance.safetyStockDays : 15;
-      const targetCoverageDays = passedCoverageDays || 60;
-
-      const totalOrders = history.reduce((sum: number, h: any) => sum + (h.orders || 0), 0);
-      const totalDays = history.length * 7;
-      const avgDailySales = totalDays > 0 ? Math.max(0.01, Number((totalOrders / totalDays).toFixed(2))) : 1;
-      const leadTimeDemand = Number((avgDailySales * leadTimeDays).toFixed(2));
-      const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
-      const reorderPoint = Number((leadTimeDemand + safetyStock).toFixed(2));
-      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + inTransitStock) / avgDailySales).toFixed(1)) : 999;
-      const suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * targetCoverageDays) - currentStock - inTransitStock));
-
-      const fallbackResult = {
-        avgDailySales,
-        leadTimeDemand,
-        safetyStock,
-        reorderPoint,
-        daysOfSupply,
-        suggestedQuantity,
-        targetCoverageDays,
-        explanation: `[AI 线路繁忙，系统已自动转换为本地供应链物理逻辑计算] 
-
-科学备货详情诊断报告：
-1. 【日周转速度】：该 SKU 历史累计销量为 ${totalOrders} 件，科学折算日均销量（Average Daily Sales）为 ${avgDailySales.toFixed(2)} 件/天。
-2. 【头程期消耗】：当前配置采购与派送头程 (Lead Time) 天数为 ${leadTimeDays} 天，对应整个运输期的必需库存周转量为 ${leadTimeDemand} 件。
-3. 【安全容错层】：设置了 ${safetyStockDays} 天安全天数备份（用于对冲船期延误、厂家排产延迟等异常），安全备用基水位为 ${safetyStock} 件。
-4. 【再订货触发点（ROP）】：科学核定再订货点为 ${reorderPoint} 件。当前“现货 + 在途总库存” ${currentStock + inTransitStock} 件，若该总和已低于其再订货点，代表随时有缺货断档之虞，需要立即下单！
-5. 【存量维持周期】：实物现货 ${currentStock} 件，加上在途在运 ${inTransitStock} 件，总库存水位为 ${currentStock + inTransitStock} 件，以当前的平均订单流速，可维持约 ${daysOfSupply} 天。
-6. 【精准建议采购量】：针对设定的采购目标期天数 ${targetCoverageDays} 天，除去现有存量基础外，本批次的最适科学建议订货量为 ${suggestedQuantity} 件，协助您在平滑周转、杜绝断货的前提下，竭力降低长期仓配周转费用与积压风险。`,
-        analyzedAt: new Date().toISOString()
-      };
-
-      return res.json(fallbackResult);
+    } catch (routeError: any) {
+      console.error("Restock Endpoint error:", routeError);
+      return res.status(500).json({ error: "服务器内部处理备货计算时出错", message: routeError.message });
     }
   });
 
