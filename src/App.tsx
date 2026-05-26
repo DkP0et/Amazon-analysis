@@ -29,6 +29,57 @@ interface SKUAnomaly {
   changeValue?: string;
 }
 
+/**
+ * 智能解析 CSV / TXT / TSV 报告
+ * 支持 UTF-8/UTF-16 LE&BE 编码自动检测与 Tab 制表符自动分隔探测。
+ */
+const detectEncodingAndParse = async (file: File): Promise<any[]> => {
+  return new Promise<any[]>((resolve, reject) => {
+    const blob = file.slice(0, 4);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const arr = new Uint8Array(e.target?.result as ArrayBuffer);
+      let encoding = "utf-8";
+      if (arr[0] === 0xff && arr[1] === 0xfe) {
+        encoding = "utf-16le";
+      } else if (arr[0] === 0xfe && arr[1] === 0xff) {
+        encoding = "utf-16be";
+      }
+      
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        encoding: encoding,
+        complete: (res) => {
+          const data = res.data;
+          const isTxtOrTsv = file.name.endsWith('.txt') || file.name.endsWith('.tsv');
+          if (isTxtOrTsv) {
+            const hasTabs = data.some(row => 
+              Object.keys(row).some(k => k.includes('\t')) || 
+              Object.values(row).some(v => typeof v === 'string' && v.includes('\t'))
+            );
+            if (hasTabs || (data.length > 0 && Object.keys(data[0]).length === 1)) {
+              Papa.parse(file, {
+                header: true,
+                skipEmptyLines: true,
+                encoding: encoding,
+                delimiter: "\t",
+                complete: (res2) => resolve(res2.data),
+                error: (err) => reject(err)
+              });
+              return;
+            }
+          }
+          resolve(data);
+        },
+        error: (err) => reject(err)
+      });
+    };
+    reader.onerror = (err) => reject(err);
+    reader.readAsArrayBuffer(blob);
+  });
+};
+
 export default function App() {
   const [stores, setStores] = useState<Store[]>([]);
   const [activeStoreId, setActiveStoreId] = useState<string>("");
@@ -586,9 +637,7 @@ export default function App() {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const csvData = await new Promise<any[]>((resolve) => {
-        Papa.parse(file, { header: true, skipEmptyLines: true, complete: (res) => resolve(res.data) });
-      });
+      const csvData = await detectEncodingAndParse(file);
 
       const extractedDate = extractDateFromFilename(file.name);
       const fileDate = extractedDate || new Date(file.lastModified).toISOString().split('T')[0];
@@ -702,9 +751,7 @@ export default function App() {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const csvData = await new Promise<any[]>((resolve) => {
-        Papa.parse(file, { header: true, skipEmptyLines: true, complete: (res) => resolve(res.data) });
-      });
+      const csvData = await detectEncodingAndParse(file);
 
       csvData.forEach(row => {
         const skuRaw = row.sku || row.SKU || row["Seller SKU"] || row["sku-name"] || row["sku"] || row["（子）ASIN"] || row["商品SKU"] || row["SKU码"] || row["MSKU"] || row["ASIN"] || "";
@@ -1526,12 +1573,12 @@ export default function App() {
                     <FileText size={28} />
                   </div>
                   <h3 className="text-xl font-bold text-slate-900 mb-2">销售业绩报告</h3>
-                  <p className="text-slate-500 text-sm leading-relaxed mb-8">处理每周业务报告（导出为 CSV）。支持多文件选择以进行周期性分析。</p>
+                  <p className="text-slate-500 text-sm leading-relaxed mb-8">处理每周业务报告（导出为 CSV 或 TXT）。支持多文件选择以进行周期性分析。</p>
                   <input 
                     type="file" 
                     ref={salesInputRef}
                     className="hidden" 
-                    accept=".csv"
+                    accept=".csv,.txt,.tsv"
                     multiple
                     onChange={handleSalesUpload}
                   />
@@ -1566,12 +1613,12 @@ export default function App() {
                     <Package size={28} />
                   </div>
                   <h3 className="text-xl font-bold text-slate-900 mb-2">库存存量帐目</h3>
-                  <p className="text-slate-500 text-sm leading-relaxed mb-8">集成当前 FBA 库存水平。将销售速度与库存风险相关联。</p>
+                  <p className="text-slate-500 text-sm leading-relaxed mb-8">集成当前 FBA 库存水平（支持 CSV 或 TXT 报告）。将销售速度与库存风险相关联。</p>
                   <input 
                     type="file" 
                     ref={inventoryInputRef}
                     className="hidden" 
-                    accept=".csv"
+                    accept=".csv,.txt,.tsv"
                     onChange={handleInventoryUpload}
                   />
                   <div className={cn(
@@ -1608,7 +1655,7 @@ export default function App() {
           )}
 
           {view === "dashboard" && (
-            <div className="p-8 space-y-8 max-w-[1400px] mx-auto">
+            <div className="p-8 space-y-8 max-w-[1650px] mx-auto">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm transition-transform hover:-translate-y-1 duration-300">
                   <div className="flex justify-between items-start mb-4">
@@ -1751,7 +1798,7 @@ export default function App() {
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-[calc(100vh-320px)] min-h-[500px]">
                 {/* SKU Table Breakdown */}
-                <div className="lg:col-span-8 flex flex-col gap-6 overflow-hidden">
+                <div className="lg:col-span-7 flex flex-col gap-6 overflow-hidden">
                   <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col overflow-hidden">
                     <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-white shrink-0">
                     <div>
@@ -1835,7 +1882,7 @@ export default function App() {
                                       )}
                                     </div>
                                     {sku.name && (
-                                      <p className="text-[11px] text-indigo-600/90 font-bold truncate max-w-[170px]" title={sku.name}>
+                                      <p className="text-[11px] text-indigo-600/90 font-bold truncate max-w-[240px]" title={sku.name}>
                                         🏷️ {sku.name}
                                       </p>
                                     )}
@@ -1959,7 +2006,7 @@ export default function App() {
               </div>
 
                 {/* AI Insight Sidebar Dashboard View */}
-                <div className="lg:col-span-4 space-y-6 flex flex-col h-full overflow-hidden">
+                <div className="lg:col-span-5 space-y-6 flex flex-col h-full overflow-hidden">
                   {selectedSku && skuPerformance[selectedSku] ? (
                     <AnimatePresence mode="wait">
                       <motion.div 
@@ -1979,7 +2026,7 @@ export default function App() {
                               <div className="flex items-center gap-1 mt-0.5">
                                 <input
                                   type="text"
-                                  className="text-xs border border-indigo-200 rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white w-full max-w-[160px] font-medium"
+                                  className="text-xs border border-indigo-200 rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white w-full max-w-[240px] font-medium"
                                   value={tempRemark}
                                   onChange={(e) => setTempRemark(e.target.value)}
                                   onKeyDown={(e) => {
@@ -2005,7 +2052,7 @@ export default function App() {
                             ) : (
                               <div className="flex items-center gap-1.5 group/remark mt-0.5 mb-1.5">
                                 <span className={cn(
-                                  "text-[11px] font-medium truncate max-w-[180px] px-1.5 py-0.5 rounded",
+                                  "text-[11px] font-medium truncate max-w-[260px] px-1.5 py-0.5 rounded",
                                   skuPerformance[selectedSku]?.name 
                                     ? "text-indigo-700 bg-indigo-50 font-bold" 
                                     : "text-slate-400 bg-slate-50 border border-slate-100"
@@ -2988,7 +3035,7 @@ export default function App() {
                             return (
                               <tr>
                                 <td colSpan={7} className="py-12 text-center text-slate-400">
-                                  暂无 SKU 数据。请先前往 “数据导入” 页面上传销售与在库 CSV 文件。
+                                  暂无 SKU 数据。请先前往 “数据导入” 页面上传销售与在库 CSV/TXT 文件。
                                 </td>
                               </tr>
                             );
