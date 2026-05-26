@@ -19,6 +19,13 @@ export interface InventoryData {
   stockLevel: number;
 }
 
+export interface InTransitBatch {
+  id: string;
+  quantity: number;
+  arriveDays: number; // 预计到达天数
+  remark?: string;    // 批次备注 (如海运第一批、空运补充等)
+}
+
 export interface RestockInsight {
   avgDailySales: number;       // Average daily sales calculated across history
   leadTimeDemand: number;      // Demand during lead time (Average daily sales * Lead time days)
@@ -39,6 +46,7 @@ export interface SKUPerformance {
   rawMaterialStock?: number;   // 仓库剩余材料套数 (折合成品)
   inTransitStock?: number;     // 在途/在运
   inTransitArriveDays?: number; // 在途预计到达/上架天数 (默认 15)
+  inTransitBatches?: InTransitBatch[]; // 多批次在途货件
   leadTimeDays?: number;       // 头程/原材料采购及打包组装提前天数
   safetyStockDays?: number;     // 安全天数
   shipmentCycleDays?: number;   // 发货间隔/发货合并统计周期天数 (默认 30 天)

@@ -8,7 +8,7 @@ import {
   Upload, Download, FileText, TrendingUp, TrendingDown, Package, 
   AlertCircle, ChevronRight, BrainCircuit, Loader2, Search,
   BarChart3, RefreshCw, Layers, CheckCircle2, XCircle, LogOut, LogIn,
-  AlertTriangle, Zap, Eye, StickyNote
+  AlertTriangle, Zap, Eye, StickyNote, Trash2, Plus, PackageOpen
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { clsx, type ClassValue } from "clsx";
@@ -142,11 +142,9 @@ export default function App() {
   };
 
   const [restockTargetDays, setRestockTargetDays] = useState<number>(60);
-  const [excludeInTransit, setExcludeInTransit] = useState<boolean>(() => {
-    return localStorage.getItem("amazon_merchant_exclude_in_transit") === "true";
-  });
-  const [restockMode, setRestockMode] = useState<'simulated' | 'exclude' | 'include'>(() => {
-    return (localStorage.getItem("amazon_merchant_restock_mode") as any) || "simulated";
+  const [excludeInTransit, setExcludeInTransit] = useState<boolean>(false);
+  const [restockMode, setRestockMode] = useState<'simulated'>(() => {
+    return "simulated";
   });
   const [isRestockLoading, setIsRestockLoading] = useState<boolean>(false);
   const [savingSku, setSavingSku] = useState<string | null>(null);
@@ -191,7 +189,7 @@ export default function App() {
     }, 4000);
   };
 
-  const handleRestockAnalyze = async (skuPerf: SKUPerformance, overrideMode?: 'simulated' | 'exclude' | 'include', forceReanalyze?: boolean) => {
+  const handleRestockAnalyze = async (skuPerf: SKUPerformance, overrideMode?: 'simulated', forceReanalyze?: boolean) => {
     setRestockSku(skuPerf.sku);
     const activeMode = overrideMode || restockMode;
     
@@ -206,7 +204,7 @@ export default function App() {
         skuService.saveSku(next[skuPerf.sku]);
         return next;
       });
-      showToast(`⚡ 已秒切载入库存分析 (${activeMode === 'simulated' ? '智能防断货' : activeMode === 'exclude' ? '保守排除在途' : '常规在途合并'})`);
+      showToast(`⚡ 已秒切载入智能防断货库存分析`);
       return;
     }
 
@@ -218,6 +216,7 @@ export default function App() {
       inTransitStock: skuPerf.inTransitStock ?? 0,
       rawMaterialStock: skuPerf.rawMaterialStock ?? 0,
       inTransitArriveDays: skuPerf.inTransitArriveDays ?? 15,
+      inTransitBatches: skuPerf.inTransitBatches || [],
       leadTimeDays: skuPerf.leadTimeDays ?? 30,
       safetyStockDays: skuPerf.safetyStockDays ?? 15,
     };
@@ -240,16 +239,24 @@ export default function App() {
 
       const restockResult = await response.json();
       
+      const restockResultWithSnapshot = {
+        ...restockResult,
+        currentStock: skuWithParams.currentStock,
+        rawMaterialStock: skuWithParams.rawMaterialStock,
+        inTransitStock: skuWithParams.inTransitStock,
+        inTransitBatches: skuWithParams.inTransitBatches
+      };
+      
       setSkuPerformance(prev => {
         const next = { ...prev };
         const updatedInsights = {
           ...(next[skuPerf.sku]?.restockInsights || {}),
-          [activeMode]: restockResult
+          [activeMode]: restockResultWithSnapshot
         };
         next[skuPerf.sku] = {
           ...next[skuPerf.sku],
           ...skuWithParams,
-          restockInsight: restockResult,
+          restockInsight: restockResultWithSnapshot,
           restockInsights: updatedInsights
         };
         skuService.saveSku(next[skuPerf.sku]);
@@ -275,6 +282,11 @@ export default function App() {
       const rawMaterialStock = skuWithParams.rawMaterialStock;
       const inTransitStock = skuWithParams.inTransitStock;
       const inTransitArriveDays = skuWithParams.inTransitArriveDays;
+      const inTransitBatches = skuWithParams.inTransitBatches || [];
+      const hasBatches = inTransitBatches && inTransitBatches.length > 0;
+      const activeInTransitStock = hasBatches 
+        ? inTransitBatches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0)
+        : inTransitStock;
 
       const leadTimeDemand = Number((avgDailySales * leadTimeDays).toFixed(2));
       const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
@@ -293,8 +305,16 @@ export default function App() {
       for (let d = 0; d <= simDaysLimit; d++) {
         if (d > 0) {
           currentSim -= avgDailySales;
-          if (d === inTransitArriveDays) {
-            currentSim += inTransitStock;
+          if (hasBatches) {
+            inTransitBatches.forEach(batch => {
+              if (Number(batch.arriveDays) === d) {
+                currentSim += (Number(batch.quantity) || 0);
+              }
+            });
+          } else {
+            if (d === inTransitArriveDays) {
+              currentSim += inTransitStock;
+            }
           }
         }
         timelineSim.push({
@@ -324,12 +344,12 @@ export default function App() {
       if (activeMode === 'exclude') {
         suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock)));
       } else if (activeMode === 'include') {
-        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock + inTransitStock)));
+        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock + activeInTransitStock)));
       } else {
         suggestedQuantity = Math.max(0, Math.ceil(safetyStock - minInventory));
       }
 
-      const effectiveInTransit = activeMode === 'exclude' ? 0 : inTransitStock;
+      const effectiveInTransit = activeMode === 'exclude' ? 0 : activeInTransitStock;
       const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + rawMaterialStock + effectiveInTransit) / avgDailySales).toFixed(1)) : 999;
 
       const fallbackResult = {
@@ -354,23 +374,31 @@ export default function App() {
      : `🟢 【供应链在库无缝覆盖】：现有在库实物足以支撑 ${(currentStock + rawMaterialStock)} 天销售，能够安全顶到第 ${inTransitArriveDays} 天在途货物到仓上架，前置周期完全闭合，无任何断货风险！`
    }
 3. 【最精准补货（备原料）计划】：
-   - 选择模式：${activeMode === "simulated" ? "科学时间轴投影仿真（极力避开断货点）" : activeMode === "exclude" ? "保守排除在途模式" : "静态包含在途模式"}
+   - 选择模式：智能防断货模型 (时间轴投影仿真)
    - 为了确保在您期望的 ${restockTargetDays} 天良性周转覆盖期内，哪怕在途大货可能存在时间错开，也绝不掉入在库警戒线（保障最低库存不低于安全基数 ${safetyStock.toFixed(0)} 件），本批次最佳精密订货/备好原料建议量为：${suggestedQuantity} 件。
 4. 【订单与排产排程指导】：
    - 采购加分装共需 ${leadTimeDays} 天。考虑到您的当前可用断库缓冲，建议最迟应在 ${Math.max(1, Math.floor(daysOfSupply - leadTimeDays))} 天内下单采购原材料并启动入库加工，以对冲头程和原料交期的耗时！`,
         analyzedAt: new Date().toISOString()
       };
 
+      const fallbackResultWithSnapshot = {
+        ...fallbackResult,
+        currentStock: skuWithParams.currentStock,
+        rawMaterialStock: skuWithParams.rawMaterialStock,
+        inTransitStock: skuWithParams.inTransitStock,
+        inTransitBatches: skuWithParams.inTransitBatches
+      };
+
       setSkuPerformance(prev => {
         const next = { ...prev };
         const updatedInsights = {
           ...(next[skuPerf.sku]?.restockInsights || {}),
-          [activeMode]: fallbackResult
+          [activeMode]: fallbackResultWithSnapshot
         };
         next[skuPerf.sku] = {
           ...next[skuPerf.sku],
           ...skuWithParams,
-          restockInsight: fallbackResult,
+          restockInsight: fallbackResultWithSnapshot,
           restockInsights: updatedInsights
         };
         skuService.saveSku(next[skuPerf.sku]);
@@ -1527,9 +1555,6 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div className="h-9 w-9 bg-slate-100 rounded-full border border-slate-200 flex items-center justify-center text-slate-400">
-              <Package size={18} />
-            </div>
           </div>
         </header>
 
@@ -2838,26 +2863,6 @@ export default function App() {
                     />
                     <span className="text-xs font-bold text-slate-500">天</span>
                   </div>
-
-                  <label className="flex items-center gap-2.5 bg-amber-500/5 hover:bg-amber-500/10 border border-amber-500/15 rounded-xl px-3.5 py-2 cursor-pointer transition-all shadow-xs shrink-0 select-none">
-                    <input 
-                      type="checkbox" 
-                      checked={excludeInTransit}
-                      onChange={(e) => {
-                        const nextVal = e.target.checked;
-                        setExcludeInTransit(nextVal);
-                        localStorage.setItem("amazon_merchant_exclude_in_transit", String(nextVal));
-                        showToast(nextVal ? "已激活「排除在途模式」，适合提前采买下批原料！" : "已恢复「包含在途模式」，常规供应链计算。");
-                      }}
-                      className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4 border-slate-300"
-                    />
-                    <div className="text-left leading-tight">
-                      <span className="text-xs font-bold text-amber-800 flex items-center gap-1">
-                        📦 备货时排除在途 <span className="text-[10px] font-medium bg-amber-500 text-white rounded px-1">提前采购</span>
-                      </span>
-                      <span className="text-[10px] text-amber-600/80 block font-normal">刚发一批货？开启此项不计在途，专门计算下批采购量</span>
-                    </div>
-                  </label>
                 </div>
               </div>
 
@@ -3061,172 +3066,6 @@ export default function App() {
                             }, 500);
                           };
 
-                          const _unusedNestedHandleRestockAnalyze = async (skuPerf: SKUPerformance, overrideMode?: 'simulated' | 'exclude' | 'include') => {
-                            setRestockSku(skuPerf.sku);
-                            setIsRestockLoading(true);
-                            
-                            const activeMode = overrideMode || restockMode;
-                            const skuWithParams = {
-                              ...skuPerf,
-                              currentStock: skuPerf.currentStock ?? 0,
-                              inTransitStock: skuPerf.inTransitStock ?? 0,
-                              rawMaterialStock: skuPerf.rawMaterialStock ?? 0,
-                              inTransitArriveDays: skuPerf.inTransitArriveDays ?? 15,
-                              leadTimeDays: skuPerf.leadTimeDays ?? 30,
-                              safetyStockDays: skuPerf.safetyStockDays ?? 15,
-                            };
-
-                            try {
-                              const response = await fetch("/api/restock-analyze", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                  skuPerformance: skuWithParams,
-                                  targetCoverageDays: restockTargetDays,
-                                  excludeInTransit: activeMode === 'exclude',
-                                  restockMode: activeMode
-                                })
-                              });
-
-                              if (!response.ok) {
-                                throw new Error("备货预测接口请求失败");
-                              }
-
-                              const restockResult = await response.json();
-                              
-                              setSkuPerformance(prev => {
-                                const next = { ...prev };
-                                next[skuPerf.sku] = {
-                                  ...next[skuPerf.sku],
-                                  ...skuWithParams,
-                                  restockInsight: restockResult
-                                };
-                                skuService.saveSku(next[skuPerf.sku]);
-                                return next;
-                              });
-
-                              showToast(`⚡ ${skuPerf.sku} AI供应链备货模型解析成功！`);
-                            } catch (err) {
-                              console.warn("AI restock analyze failed, falling back to client-side local calculation:", err);
-                              
-                              // Local MRP simulation engine
-                              const history = skuPerf.history || [];
-                              const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
-                              const totalDays = history.length * 7;
-                              const calculatedDailySales = totalDays > 0 ? Math.max(0.01, Number((totalOrders / totalDays).toFixed(2))) : 1;
-                              const avgDailySales = skuPerf.forecastedDailySales !== undefined && skuPerf.forecastedDailySales > 0
-                                ? Number(skuPerf.forecastedDailySales)
-                                : calculatedDailySales;
-
-                              const leadTimeDays = skuWithParams.leadTimeDays;
-                              const safetyStockDays = skuWithParams.safetyStockDays;
-                              const currentStock = skuWithParams.currentStock;
-                              const rawMaterialStock = skuWithParams.rawMaterialStock;
-                              const inTransitStock = skuWithParams.inTransitStock;
-                              const inTransitArriveDays = skuWithParams.inTransitArriveDays;
-
-                              const leadTimeDemand = Number((avgDailySales * leadTimeDays).toFixed(2));
-                              const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
-                              const reorderPoint = Number((leadTimeDemand + safetyStock).toFixed(2));
-
-                              // Timeline simulator
-                              const timelineSim = [];
-                              let currentSim = currentStock + rawMaterialStock;
-                              let minInventory = currentSim;
-                              let outOfStockDayStart = -1;
-                              let outOfStockDayEnd = -1;
-                              let isOutOfStockEver = false;
-                              let outOfStockDaysCount = 0;
-
-                              const simDaysLimit = Math.max(90, restockTargetDays);
-                              for (let d = 0; d <= simDaysLimit; d++) {
-                                if (d > 0) {
-                                  currentSim -= avgDailySales;
-                                  if (d === inTransitArriveDays) {
-                                    currentSim += inTransitStock;
-                                  }
-                                }
-                                timelineSim.push({
-                                  day: d,
-                                  stock: Math.round(currentSim),
-                                  safetyLine: Math.round(safetyStock),
-                                });
-
-                                if (d > 0) {
-                                  if (currentSim < 0) {
-                                    outOfStockDaysCount++;
-                                    if (!isOutOfStockEver) {
-                                      outOfStockDayStart = d;
-                                      isOutOfStockEver = true;
-                                    }
-                                    outOfStockDayEnd = d;
-                                  }
-                                  if (d <= restockTargetDays) {
-                                    if (currentSim < minInventory) {
-                                      minInventory = currentSim;
-                                    }
-                                  }
-                                }
-                              }
-
-                              let suggestedQuantity = 0;
-                              if (activeMode === 'exclude') {
-                                suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock)));
-                              } else if (activeMode === 'include') {
-                                suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock + inTransitStock)));
-                              } else {
-                                suggestedQuantity = Math.max(0, Math.ceil(safetyStock - minInventory));
-                              }
-
-                              const effectiveInTransit = activeMode === 'exclude' ? 0 : inTransitStock;
-                              const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + rawMaterialStock + effectiveInTransit) / avgDailySales).toFixed(1)) : 999;
-
-                              const fallbackResult = {
-                                avgDailySales,
-                                leadTimeDemand,
-                                safetyStock,
-                                reorderPoint,
-                                daysOfSupply,
-                                suggestedQuantity,
-                                targetCoverageDays: restockTargetDays,
-                                timelineSim,
-                                restockMode: activeMode,
-                                inTransitArriveDays,
-                                explanation: `[AI 模块由于网络瞬时繁忙，系统已无缝启动本地一流水准的时间轴动态物理数学运算模型]
-
-【科学库存与在途动态仿真报告 - 本地】
-
-1. 【销量流速监测】：该 SKU 精算日均销量达 ${avgDailySales.toFixed(2)} 件/日。
-2. 【时间流耗察】：当前在库成品+可拆材料折合共 ${(currentStock + rawMaterialStock)} 件。由于已出发在途的 ${inTransitStock} 件预计需要 ${inTransitArriveDays} 天后才能抵达入仓。
-   ${isOutOfStockEver 
-     ? `🚨 【断货真空期红色警讯】：由于现有在库仅够维持 ${Math.floor((currentStock + rawMaterialStock) / (avgDailySales || 1))} 天，而在途大货要在 ${inTransitArriveDays} 天后才到，因此预计在“未来第 ${outOfStockDayStart} 天至第 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）”期间将出现严重的临时缺货断档断崖！这是传统的‘直接计入在途合并计算’根本无法发现的时间差盲点！`
-     : `🟢 【供应链在库无缝覆盖】：现有在库实物足以支撑 ${(currentStock + rawMaterialStock) / (avgDailySales || 1)} 天销售，能够安全顶到第 ${inTransitArriveDays} 天在途货物到仓上架，前置周期完全闭合，无任何断货风险！`
-   }
-3. 【最精准补货（备原料）计划】：
-   - 选择模式：${activeMode === "simulated" ? "科学时间轴投影仿真（极力避开断货点）" : activeMode === "exclude" ? "保守排除在途模式" : "静态包含在途模式"}
-   - 为了确保在您期望的 ${restockTargetDays} 天良性周转覆盖期内，哪怕在途大货可能存在时间错开，也绝不掉入在库警戒线（保障最低库存不低于安全基数 ${safetyStock.toFixed(0)} 件），本批次最佳精密订货/备好原料建议量为：${suggestedQuantity} 件。
-4. 【订单与排产排程指导】：
-   - 采购加分装共需 ${leadTimeDays} 天。考虑到您的当前可用断库缓冲，建议最迟应在 ${Math.max(1, Math.floor(daysOfSupply - leadTimeDays))} 天内下单采购原材料并启动入库加工，以对冲头程和原料交期的耗时！`,
-                                analyzedAt: new Date().toISOString()
-                              };
-
-                              setSkuPerformance(prev => {
-                                const next = { ...prev };
-                                next[skuPerf.sku] = {
-                                  ...next[skuPerf.sku],
-                                  ...skuWithParams,
-                                  restockInsight: fallbackResult
-                                };
-                                skuService.saveSku(next[skuPerf.sku]);
-                                return next;
-                              });
-
-                              showToast(`⚠️ AI 线路繁忙，系统已无缝切换至本地时间轴物理备货模型！`);
-                            } finally {
-                              setIsRestockLoading(false);
-                            }
-                          };
-
                           return currentStoreSkus.map(s => {
                             const history = s.history || [];
                             const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
@@ -3286,14 +3125,35 @@ export default function App() {
 
                                 {/* In transit stock */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-1">
+                                  <div className="inline-flex items-center gap-1.5">
                                     <input 
                                       type="number" 
-                                      defaultValue={inTransitStock} 
-                                      onBlur={(e) => handleInstantSaveField(s, 'inTransitStock', parseInt(e.target.value) || 0)}
+                                      value={inTransitStock} 
+                                      disabled={s.inTransitBatches && s.inTransitBatches.length > 0}
+                                      onChange={(e) => {
+                                        if (!s.inTransitBatches || s.inTransitBatches.length === 0) {
+                                          handleInstantSaveField(s, 'inTransitStock', parseInt(e.target.value) || 0);
+                                        }
+                                      }}
+                                      onBlur={(e) => {
+                                        if (!s.inTransitBatches || s.inTransitBatches.length === 0) {
+                                          handleInstantSaveField(s, 'inTransitStock', parseInt(e.target.value) || 0);
+                                        }
+                                      }}
                                       onClick={(e) => e.stopPropagation()}
-                                      className="w-16 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center font-semibold text-slate-800 outline-none text-xs"
+                                      title={s.inTransitBatches && s.inTransitBatches.length > 0 ? "已启用多批次在途物流，总量由各批次合并计算。可在右侧看板增删微调。" : ""}
+                                      className={cn(
+                                        "w-16 text-center font-semibold rounded px-1.5 py-1 text-xs outline-none",
+                                        s.inTransitBatches && s.inTransitBatches.length > 0
+                                          ? "bg-indigo-50 border border-indigo-150 text-indigo-700 font-bold"
+                                          : "bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 text-slate-800"
+                                      )}
                                     />
+                                    {s.inTransitBatches && s.inTransitBatches.length > 0 && (
+                                      <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded cursor-help" title="多批次追踪中">
+                                        {s.inTransitBatches.length}批
+                                      </span>
+                                    )}
                                     {savingSku === `${s.sku}_inTransitStock` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
                                   </div>
                                 </td>
@@ -3350,15 +3210,15 @@ export default function App() {
                                   )}>
                                     {daysOfSupply > 180 ? "180+ 天" : `${Math.round(daysOfSupply)} 天`}
                                   </span>
-                                  {(excludeInTransit || restockMode === 'exclude') ? (
+                                  {excludeInTransit ? (
                                     <span className="text-[9px] text-amber-600 font-bold block mt-1" title="当前已启用已屏蔽在途，仅计算在库及原材料实载可卖周期">
                                       (剔除在途款)
                                     </span>
-                                  ) : restockMode === 'simulated' ? (
+                                  ) : (
                                     <span className="text-[9px] text-indigo-600 font-bold block mt-1" title="通过多时间轴精算仿真中">
                                       (时间轴仿真)
                                     </span>
-                                  ) : null}
+                                  )}
                                 </td>
 
                                 {/* Action trigger */}
@@ -3402,6 +3262,12 @@ export default function App() {
                       const sObj = skuPerformance[restockSku];
                       const insight = sObj.restockInsight;
                       const hasResult = !!insight;
+                      const isStale = hasResult && (
+                        sObj.currentStock !== (insight.currentStock ?? sObj.currentStock) ||
+                        sObj.rawMaterialStock !== (insight.rawMaterialStock ?? sObj.rawMaterialStock) ||
+                        sObj.inTransitStock !== (insight.inTransitStock ?? sObj.inTransitStock) ||
+                        JSON.stringify(sObj.inTransitBatches || []) !== JSON.stringify(insight.inTransitBatches || [])
+                      );
                       
                       const h = sObj.history || [];
                       const tot = h.reduce((sum, item) => sum + (item.orders || 0), 0);
@@ -3437,36 +3303,159 @@ export default function App() {
                             </div>
                           </div>
 
-                          {/* Replenishment Simulated Modes Selector */}
+                          {/* Replenishment Simulated Model Header */}
                           <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex flex-col gap-1.5">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">选择计算策略（切换即取本地/AI历史缓存）</span>
-                            <div className="grid grid-cols-3 gap-1 bg-slate-200/50 p-1 rounded-lg">
-                              {[
-                                { id: "simulated", label: "智能防断货模型", desc: "时间轴投影仿真" },
-                                { id: "exclude", label: "保守买料模型", desc: "排除在途数量" },
-                                { id: "include", label: "常规在途合并", desc: "合并在途推荐" }
-                              ].map(m => {
-                                const isSel = (restockMode === m.id);
-                                return (
-                                  <button
-                                    key={m.id}
-                                    onClick={() => {
-                                      setRestockMode(m.id as any);
-                                      localStorage.setItem("amazon_merchant_restock_mode", m.id);
-                                      handleRestockAnalyze(sObj, m.id as any);
-                                    }}
-                                    className={cn(
-                                      "py-1 rounded text-center transition-all focus:outline-none flex flex-col items-center justify-center",
-                                      isSel 
-                                        ? "bg-white shadow-xs text-indigo-600 font-bold" 
-                                        : "text-slate-500 hover:text-slate-800"
-                                    )}
-                                  >
-                                    <span className="text-[11px] font-bold leading-none">{m.label}</span>
-                                    <span className="text-[8px] text-slate-400 font-normal leading-normal mt-0.5 scale-90">{m.desc}</span>
-                                  </button>
-                                );
-                              })}
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">计算策略模型</span>
+                            <div className="flex items-center gap-2 bg-white px-3 py-2.5 rounded-xl border border-slate-200/60 shadow-xs">
+                              <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                                <BrainCircuit size={14} />
+                              </div>
+                              <div>
+                                <h5 className="text-[11px] font-bold text-[#0F172A] flex items-center gap-1.5">
+                                  智能防断货模型
+                                  <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1 py-0.2 rounded font-mono font-medium">推荐启用</span>
+                                </h5>
+                                <p className="text-[9px] text-slate-400 font-normal leading-tight mt-0.5">采用时间轴投影高阶仿真算法对齐未来到货时间真空</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Multi-batch In-Transit Shipment Split Manager */}
+                          <div className="px-5 py-4 border-b border-slate-100 bg-indigo-50/20 text-slate-700">
+                            <div className="flex justify-between items-center mb-2">
+                              <div className="flex items-center gap-1.5">
+                                <PackageOpen size={14} className="text-indigo-600" />
+                                <span className="text-xs font-bold text-slate-700">在途多批次物流追踪与到货对齐</span>
+                              </div>
+                              <span className="text-[10px] text-slate-400 font-mono">
+                                共 {(sObj.inTransitBatches || []).length} 批 (共 {(sObj.inTransitBatches || []).reduce((sum, b) => sum + (Number(b.quantity) || 0), 0)} 件)
+                              </span>
+                            </div>
+
+                            {/* Batches list */}
+                            {(sObj.inTransitBatches || []).length > 0 ? (
+                              <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1 mb-3">
+                                {(sObj.inTransitBatches || []).map((batch, idx) => (
+                                  <div key={batch.id} className="flex justify-between items-center bg-white p-2 rounded-lg border border-indigo-100 shadow-xs text-[11px]">
+                                    <div className="flex flex-col">
+                                      <span className="font-semibold text-slate-800">批次 {idx + 1}: <span className="text-indigo-600 font-bold">{batch.quantity}</span> 件</span>
+                                      <span className="text-[9px] text-slate-400 font-medium">预计未来第 <span className="text-amber-600 font-bold">{batch.arriveDays}</span> 天上架 • {batch.remark || "未标注"}</span>
+                                    </div>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const updatedBatches = (sObj.inTransitBatches || []).filter(b => b.id !== batch.id);
+                                        const newSum = updatedBatches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+                                        const updatedSku = {
+                                          ...sObj,
+                                          inTransitBatches: updatedBatches,
+                                          inTransitStock: newSum
+                                        };
+                                        setSkuPerformance(prev => ({
+                                          ...prev,
+                                          [sObj.sku]: updatedSku
+                                        }));
+                                        skuService.saveSku(updatedSku);
+                                        showToast("🗑️ 已成功在本地移除在途批次。下方分析已过期，请手动点击“重新运行预测”已对齐最新数据！");
+                                      }}
+                                      className="text-rose-500 hover:text-rose-700 p-1 hover:bg-rose-50 rounded transition-all cursor-pointer"
+                                      title="删除此批次"
+                                    >
+                                      <Trash2 size={11} />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="text-center p-3 border border-dashed border-indigo-100 rounded-lg text-[10px] text-slate-400 mb-3 leading-relaxed bg-white/60">
+                                当前处于单一在途合并模式 ({sObj.inTransitStock || 0} 件，第 {sObj.inTransitArriveDays ?? 15} 天一并到货)。
+                                <br />
+                                <span className="text-indigo-500 font-semibold">新增下方多个分批在途货件，即可启用每日精准的时间轴折旧推算仿真！</span>
+                              </div>
+                            )}
+
+                            {/* Form to add a new batch */}
+                            <div className="bg-white p-2.5 rounded-lg border border-indigo-100/60 flex flex-col gap-2 shadow-xs">
+                              <span className="text-[10px] font-bold text-indigo-700 uppercase tracking-wide">登记新一批 在途货件</span>
+                              <div className="grid grid-cols-3 gap-1.5">
+                                <div>
+                                  <label className="text-[9px] text-slate-400 block mb-1">数量 (件)</label>
+                                  <input 
+                                    id="new-batch-qty"
+                                    type="number" 
+                                    placeholder="数量" 
+                                    className="w-full text-xs border border-slate-200 rounded px-1.5 py-1 outline-none text-right focus:border-indigo-500 font-mono font-bold"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[9px] text-slate-400 block mb-1">预计到达天数</label>
+                                  <input 
+                                    id="new-batch-days"
+                                    type="number" 
+                                    placeholder="第几天" 
+                                    className="w-full text-xs border border-slate-200 rounded px-1.5 py-1 outline-none text-right focus:border-indigo-500 font-mono font-bold"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[9px] text-slate-400 block mb-1 font-medium">物流备注</label>
+                                  <input 
+                                    id="new-batch-remark"
+                                    type="text" 
+                                    placeholder="如: 美森快船" 
+                                    className="w-full text-xs border border-slate-200 rounded px-1.5 py-1 outline-none focus:border-indigo-500 font-sans"
+                                  />
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  const qtyInput = document.getElementById("new-batch-qty") as HTMLInputElement;
+                                  const daysInput = document.getElementById("new-batch-days") as HTMLInputElement;
+                                  const remarkInput = document.getElementById("new-batch-remark") as HTMLInputElement;
+                                  
+                                  const qty = parseInt(qtyInput?.value || "0");
+                                  const days = parseInt(daysInput?.value || "0");
+                                  const remark = remarkInput?.value || "";
+
+                                  if (!qty || qty <= 0 || !days || days <= 0) {
+                                    showToast("❌ 请输入有效的在途数量与预计到达天数！");
+                                    return;
+                                  }
+
+                                  const newBatch = {
+                                    id: 'batch_' + Date.now(),
+                                    quantity: qty,
+                                    arriveDays: days,
+                                    remark: remark || "在途货件"
+                                  };
+
+                                  const existingBatches = sObj.inTransitBatches || [];
+                                  const updatedBatches = [...existingBatches, newBatch];
+                                  const newSum = updatedBatches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+
+                                  const updatedSku = {
+                                    ...sObj,
+                                    inTransitBatches: updatedBatches,
+                                    inTransitStock: newSum
+                                  };
+
+                                  setSkuPerformance(prev => ({
+                                    ...prev,
+                                    [sObj.sku]: updatedSku
+                                  }));
+                                  skuService.saveSku(updatedSku);
+
+                                  // Clear inputs
+                                  if (qtyInput) qtyInput.value = "";
+                                  if (daysInput) daysInput.value = "";
+                                  if (remarkInput) remarkInput.value = "";
+
+                                  showToast("📦 在途货件登记成功！各项参数已录入。如需更新分析结论，请手动点击右上方“重新运行预测”。");
+                                }}
+                                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all shadow-xs cursor-pointer active:scale-95"
+                              >
+                                <Plus size={10} />
+                                <span>添加并在时间轴上注册该货件</span>
+                              </button>
                             </div>
                           </div>
 
@@ -3492,6 +3481,20 @@ export default function App() {
                                 animate={{ opacity: 1 }}
                                 className="p-6 space-y-6"
                               >
+                                {isStale && (
+                                  <div className="p-3.5 bg-amber-50 border border-amber-200/60 rounded-xl flex items-start gap-2.5 text-amber-800 text-[11px] leading-relaxed">
+                                    <AlertTriangle size={15} className="text-amber-500 shrink-0 mt-0.5" />
+                                    <div>
+                                      <p className="font-bold text-amber-950 flex items-center gap-1">
+                                        <span>⚠️ 仓储参数或在途货件已更新</span>
+                                      </p>
+                                      <p className="text-amber-700 mt-0.5">
+                                        检测到您刚更新了该产品的备货明细，当前展示预测仍是历史快照。请点击面板右上角 <span className="font-extrabold text-indigo-700">“重新运行预测”</span> 按钮，手动重新计算新一期防断货仿真与采购方案！
+                                      </p>
+                                    </div>
+                                  </div>
+                                )}
+
                                 {/* Metrics Grid */}
                                 <div className="grid grid-cols-2 gap-3.5">
                                   <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl">
