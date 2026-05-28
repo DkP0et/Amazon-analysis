@@ -8,7 +8,7 @@ import {
   Upload, Download, FileText, TrendingUp, TrendingDown, Package, 
   AlertCircle, ChevronRight, BrainCircuit, Loader2, Search,
   BarChart3, RefreshCw, Layers, CheckCircle2, XCircle, LogOut, LogIn,
-  AlertTriangle, Zap, Eye, StickyNote, Trash2, Plus, PackageOpen
+  AlertTriangle, Zap, Eye, StickyNote, Trash2, Plus, PackageOpen, HelpCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { clsx, type ClassValue } from "clsx";
@@ -18,6 +18,56 @@ import { skuService } from "./lib/skuService";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+interface InfoTooltipProps {
+  title?: string;
+  content: string;
+  children: React.ReactNode;
+  position?: "top" | "bottom" | "left" | "right";
+  widthClass?: string;
+  iconColorClass?: string;
+}
+
+function InfoTooltip({ 
+  title, 
+  content, 
+  children, 
+  position = "top", 
+  widthClass = "w-64",
+  iconColorClass = "text-slate-400 hover:text-slate-600 dark:text-slate-500" 
+}: InfoTooltipProps) {
+  const positionClasses = {
+    top: "bottom-full left-1/2 -translate-x-1/2 mb-2 origin-bottom",
+    bottom: "top-full left-1/2 -translate-x-1/2 mt-2 origin-top",
+    left: "right-full top-1/2 -translate-y-1/2 mr-2 origin-right",
+    right: "left-full top-1/2 -translate-y-1/2 ml-2 origin-left",
+  };
+
+  const arrowClasses = {
+    top: "top-full left-1/2 -translate-x-1/2 border-t-slate-900 border-x-transparent border-b-transparent",
+    bottom: "bottom-full left-1/2 -translate-x-1/2 border-b-slate-900 border-x-transparent border-t-transparent",
+    left: "left-full top-1/2 -translate-y-1/2 border-l-slate-900 border-y-transparent border-r-transparent",
+    right: "right-full top-1/2 -translate-y-1/2 border-r-slate-900 border-y-transparent border-l-transparent",
+  };
+
+  return (
+    <span className="group relative inline-flex items-center gap-1 cursor-help">
+      {children}
+      <HelpCircle size={11} className={cn("transition-colors shrink-0", iconColorClass)} />
+      <span 
+        className={cn(
+          "absolute p-3 bg-slate-900 border border-slate-800 text-white rounded-xl shadow-xl text-xs font-normal leading-relaxed opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-[99] pointer-events-none scale-95 group-hover:scale-100",
+          positionClasses[position],
+          widthClass
+        )}
+      >
+        {title && <span className="font-extrabold text-amber-400 mb-1 tracking-wide block text-[12px]">{title}</span>}
+        <span className="text-slate-200 text-[11px] leading-relaxed select-text pointer-events-auto block normal-case whitespace-normal text-left">{content}</span>
+        <span className={cn("absolute border-4", arrowClasses[position])} />
+      </span>
+    </span>
+  );
 }
 
 interface SKUAnomaly {
@@ -295,7 +345,8 @@ export default function App() {
       // Timeline simulator
       const timelineSim = [];
       let currentSim = currentStock + rawMaterialStock;
-      let minInventory = currentSim;
+      let unflooredSim = currentStock + rawMaterialStock;
+      let minInventory = unflooredSim;
       let outOfStockDayStart = -1;
       let outOfStockDayEnd = -1;
       let isOutOfStockEver = false;
@@ -305,16 +356,25 @@ export default function App() {
       for (let d = 0; d <= simDaysLimit; d++) {
         if (d > 0) {
           currentSim -= avgDailySales;
+          unflooredSim -= avgDailySales;
           if (hasBatches) {
             inTransitBatches.forEach(batch => {
               if (Number(batch.arriveDays) === d) {
-                currentSim += (Number(batch.quantity) || 0);
+                const qty = Number(batch.quantity) || 0;
+                currentSim += qty;
+                unflooredSim += qty;
               }
             });
           } else {
             if (d === inTransitArriveDays) {
               currentSim += inTransitStock;
+              unflooredSim += inTransitStock;
             }
+          }
+
+          // 物理实际库存不会为负数，扣减到 0 为止
+          if (currentSim < 0) {
+            currentSim = 0;
           }
         }
         timelineSim.push({
@@ -324,7 +384,8 @@ export default function App() {
         });
 
         if (d > 0) {
-          if (currentSim < 0) {
+          // 断货判断使用未封底的理论供需缺口（代表实际流失或断货）
+          if (unflooredSim < 0) {
             outOfStockDaysCount++;
             if (!isOutOfStockEver) {
               outOfStockDayStart = d;
@@ -333,8 +394,8 @@ export default function App() {
             outOfStockDayEnd = d;
           }
           if (d <= restockTargetDays) {
-            if (currentSim < minInventory) {
-              minInventory = currentSim;
+            if (unflooredSim < minInventory) {
+              minInventory = unflooredSim;
             }
           }
         }
@@ -1877,10 +1938,10 @@ export default function App() {
                               animate={{ opacity: 1 }}
                               className={cn(
                                 "group cursor-pointer transition-colors duration-150",
-                                isActive ? "bg-indigo-50/50" : hasAnomaly ? "bg-rose-50/30" : "hover:bg-slate-50"
+                                isActive ? "bg-indigo-100/60 shadow-[inset_0_1px_0_0_rgba(165,180,252,0.4),_inset_0_-1px_0_0_rgba(165,180,252,0.4)]" : hasAnomaly ? "bg-rose-50/30" : "hover:bg-slate-50"
                               )}
                             >
-                              <td className="px-6 py-5">
+                              <td className={cn("px-6 py-5 transition-all duration-150", isActive ? "border-l-4 border-indigo-600 pl-5" : "border-l-4 border-transparent pl-5")}>
                                 <div className="flex items-center gap-4">
                                   <div className="relative">
                                     <div className={cn(
@@ -2927,9 +2988,9 @@ export default function App() {
               })()}
 
               {/* Main Workspace splits */}
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 xl:h-[calc(100vh-320px)] xl:min-h-[600px] overflow-hidden">
                 {/* SKU list table area */}
-                <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden flex flex-col">
+                <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden flex flex-col xl:h-full">
                   <div className="p-6 border-b border-slate-100 flex flex-col gap-4 bg-slate-50/50">
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                       <div>
@@ -2953,43 +3014,63 @@ export default function App() {
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                           <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-500 block">在途到仓天数 (天)</label>
+                            <InfoTooltip
+                              title="在途到仓天数 (Transit Days)"
+                              content="已经在途运输的这批货物，预计大约还有多少天能够全部进入 FBA 并解冻上架成可售库存。"
+                            >
+                              <label className="text-[10px] font-bold text-slate-500 cursor-help block">在途到仓天数 (天)</label>
+                            </InfoTooltip>
                             <input 
                               type="number" 
                               placeholder="如 15"
                               value={batchValues.inTransitArriveDays}
                               onChange={(e) => setBatchValues(prev => ({ ...prev, inTransitArriveDays: e.target.value }))}
-                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono"
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
                             />
                           </div>
                           <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-500 block">头程前置天数 (天)</label>
+                            <InfoTooltip
+                              title="头程前置天数 (Lead Time - LT)"
+                              content="从生成下一批大货采购需求、工厂排产、打包贴标、起运报关、海上漂流航程、最终并完全在上架的全生命周期总耗时。"
+                            >
+                              <label className="text-[10px] font-bold text-slate-500 cursor-help block">头程前置天数 (天)</label>
+                            </InfoTooltip>
                             <input 
                               type="number" 
                               placeholder="如 30"
                               value={batchValues.leadTimeDays}
                               onChange={(e) => setBatchValues(prev => ({ ...prev, leadTimeDays: e.target.value }))}
-                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono"
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
                             />
                           </div>
                           <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-500 block">安全缓冲天数 (天)</label>
+                            <InfoTooltip
+                              title="安全缓冲天数 (Safety Stock Days - SS)"
+                              content="希望预留的应急安全水位折算天数，当供应链遇到不可控延误（如查验、海船拥堵）时，缓冲库能为您纠偏防范断货风险。"
+                            >
+                              <label className="text-[10px] font-bold text-slate-500 cursor-help block">安全缓冲天数 (天)</label>
+                            </InfoTooltip>
                             <input 
                               type="number" 
                               placeholder="如 15"
                               value={batchValues.safetyStockDays}
                               onChange={(e) => setBatchValues(prev => ({ ...prev, safetyStockDays: e.target.value }))}
-                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono"
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
                             />
                           </div>
                           <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-500 block">在途数量 (件, 可选)</label>
+                            <InfoTooltip
+                              title="在途数量 (In-transit)"
+                              content="已经采购发出，正在处于装集装箱、海运中或者在等待海关验关，即将入库亚马逊的库存储备数量。"
+                            >
+                              <label className="text-[10px] font-bold text-slate-500 cursor-help block">在途数量 (件, 可选)</label>
+                            </InfoTooltip>
                             <input 
                               type="number" 
                               placeholder="全局在途"
                               value={batchValues.inTransitStock}
                               onChange={(e) => setBatchValues(prev => ({ ...prev, inTransitStock: e.target.value }))}
-                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono"
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
                             />
                           </div>
                         </div>
@@ -3019,17 +3100,73 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="overflow-x-auto">
+                  <div className="flex-1 overflow-y-auto overflow-x-auto min-h-[350px]">
                     <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                          <th className="py-4 px-4">SKU / 备注名</th>
-                          <th className="py-4 px-3 text-center" title="货架在库库存成品件数">当前在库</th>
-                          <th className="py-4 px-3 text-center" title="海外或国内已采购发出在途运输中货物数量">在途数量</th>
-                          <th className="py-4 px-3 text-center" title="在途货物预计多长天数后能够抵达Amazon入仓上架">在途到仓(天)</th>
-                          <th className="py-4 px-3 text-center" title="下一大批采购在仓加工分拣加运输总延迟天数">头程前置(天)</th>
-                          <th className="py-4 px-3 text-center" title="应对船期延迟等异常波动备有的安全余量天数">安全缓冲(天)</th>
-                          <th className="py-4 px-3 text-center">剩余周转</th>
+                      <thead className="bg-[#F8FAFC] border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+                        <tr className="bg-slate-50 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                          <th className="py-4 px-4">
+                            <InfoTooltip
+                              title="SKU / 备注名"
+                              content="库存唯一识别编码 (SKU)。您可以点击下方文本框添加自定义备注名称（如中文名、产品线等），以便进行日常备货识别。"
+                              position="bottom"
+                            >
+                              <span>SKU / 备注名</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="当前在库库存 (Current On-hand)"
+                              content="海外亚马逊 FBA 实货在库数量 + 本地原材料待打包成品库存（如已录入）。这是您随时可见的物理安全成品现货。"
+                              position="bottom"
+                            >
+                              <span>当前在库</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="在途数量 (In-transit Stock)"
+                              content="已经成箱下线、采购付发或处于跨境船运/空运等前置运输途中的集装箱内货物，短期内即将解冻变成可售件数。"
+                              position="bottom"
+                            >
+                              <span>在途数量</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="在途到仓天数 (Transit Days)"
+                              content="已经在物流途中的这批货物，预计还需运输漂流多少个天数，才能完成目的港清关、陆运派送，被海外 FBA 仓签收并完全上架变为可售件数。"
+                              position="bottom"
+                            >
+                              <span>在途到仓(天)</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="头程前置天数 (Lead Time - LT)"
+                              content="从计划向工厂下单、备料排单生产、国内陆运发货、海外海运漂洋、目的港清关、卡派送仓至完全上架的期望累计总响应天数。"
+                              position="bottom"
+                            >
+                              <span>头程前置(天)</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="安全缓冲天数 (Safety Stock Days - SS)"
+                              content="为应对因清关滞留、旺季塞港甩箱、排仓、海运延误或突发的销量暴涨等异常状况，预备建立的缓冲天数，防止因外部被动断货导致排名流失。"
+                              position="bottom"
+                            >
+                              <span>安全缓冲(天)</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="剩余周转天数 (Days of Supply)"
+                              content="通过对最近数周的平均流速进行日历加权动态平滑后，当前的总在库在仓可用现货还足够支撑您卖多少天。反映库存库容健康度的敏感指标。"
+                              position="bottom"
+                            >
+                              <span>剩余周转</span>
+                            </InfoTooltip>
+                          </th>
                           <th className="py-4 px-4 text-right">补货操作</th>
                         </tr>
                       </thead>
@@ -3091,13 +3228,13 @@ export default function App() {
                               <tr 
                                 key={`${s.sku}_${currentStock}_${inTransitStock}_${s.inTransitArriveDays ?? 15}_${leadTimeDays}_${safetyStockDays}`} 
                                 className={cn(
-                                  "hover:bg-slate-50/70 transition-all cursor-pointer",
-                                  restockSku === s.sku ? "bg-indigo-50/30" : ""
+                                  "transition-all cursor-pointer group",
+                                  restockSku === s.sku ? "bg-indigo-100/60 shadow-[inset_0_1px_0_0_rgba(165,180,252,0.4),_inset_0_-1px_0_0_rgba(165,180,252,0.4)]" : "hover:bg-slate-50/70"
                                 )}
                                 onClick={() => setRestockSku(s.sku)}
                               >
                                 {/* SKU Info */}
-                                <td className="py-4 px-4 max-w-[200px]">
+                                <td className={cn("py-4 px-4 max-w-[200px] transition-all duration-150", restockSku === s.sku ? "border-l-4 border-indigo-600 pl-3" : "border-l-4 border-transparent pl-3")}>
                                   <div className="font-bold text-slate-950 break-words">{s.sku}</div>
                                   <input 
                                     type="text" 
@@ -3256,7 +3393,7 @@ export default function App() {
                 </div>
 
                 {/* Right side diagnostics */}
-                <div className="xl:col-span-1 flex flex-col space-y-6">
+                <div className="xl:col-span-1 flex flex-col xl:h-full overflow-hidden">
                   {restockSku && skuPerformance[restockSku] ? (
                     (() => {
                       const sObj = skuPerformance[restockSku];
@@ -3279,7 +3416,7 @@ export default function App() {
                       const localReplenish = Math.max(0, Math.ceil((localAvg * restockTargetDays) - currentStock - effectiveInTransit));
 
                       return (
-                        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col xl:h-full">
                           {/* Panel Header */}
                           <div className="p-6 border-b border-indigo-950 bg-[#0F172A] text-white flex justify-between items-center bg-gradient-to-r from-slate-900 to-indigo-950">
                             <div>
@@ -3303,7 +3440,8 @@ export default function App() {
                             </div>
                           </div>
 
-                          {/* Replenishment Simulated Model Header */}
+                          <div className="flex-1 overflow-y-auto pr-1">
+                            {/* Replenishment Simulated Model Header */}
                           <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex flex-col gap-1.5">
                             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">计算策略模型</span>
                             <div className="flex items-center gap-2 bg-white px-3 py-2.5 rounded-xl border border-slate-200/60 shadow-xs">
@@ -3497,21 +3635,44 @@ export default function App() {
 
                                 {/* Metrics Grid */}
                                 <div className="grid grid-cols-2 gap-3.5">
-                                  <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl">
-                                    <p className="text-[10px] text-slate-400 font-bold uppercase mb-0.5 leading-normal">预测日均销量</p>
-                                    <p className="text-lg font-extrabold text-slate-900 font-mono">{insight.avgDailySales.toFixed(2)} <span className="text-[10px] font-semibold text-slate-500">件/日</span></p>
+                                  <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl flex flex-col justify-between">
+                                    <InfoTooltip
+                                      title="预测日均销量 (Avg Daily Sales)"
+                                      content="基于您上传的销售历史订单流速，经多周期根据近期销量进行平滑加权得出的未来天平均销量基准，是评估库存周期的基础因子。"
+                                    >
+                                      <p className="text-[10px] text-slate-400 font-bold uppercase mb-0.5 leading-normal cursor-help">预测日均销量</p>
+                                    </InfoTooltip>
+                                    <p className="text-lg font-extrabold text-slate-900 font-mono mt-0.5">{insight.avgDailySales.toFixed(2)} <span className="text-[10px] font-semibold text-slate-500">件/日</span></p>
                                   </div>
-                                  <div className="p-3 bg-amber-500/5 border border-amber-500/10 rounded-xl">
-                                    <p className="text-[10px] text-amber-600 font-bold uppercase mb-0.5 leading-normal">头程消耗 (LTD)</p>
-                                    <p className="text-lg font-extrabold text-amber-700 font-mono">{Math.round(insight.leadTimeDemand)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
+                                  <div className="p-3 bg-amber-500/5 border border-amber-500/10 rounded-xl flex flex-col justify-between">
+                                    <InfoTooltip
+                                      title="头程消耗 (LTD, Lead Time Demand)"
+                                      content="在前置发货期（Lead Time：生产+到仓）内预计销售消费消耗的库存。公式：LTD = 预测日均销量 × 头程前置天数。"
+                                      iconColorClass="text-amber-500/80 hover:text-amber-600"
+                                    >
+                                      <p className="text-[10px] text-amber-600 font-bold uppercase mb-0.5 leading-normal cursor-help">头程消耗 (LTD)</p>
+                                    </InfoTooltip>
+                                    <p className="text-lg font-extrabold text-amber-700 font-mono mt-0.5">{Math.round(insight.leadTimeDemand)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
                                   </div>
-                                  <div className="p-3 bg-blue-50 border border-blue-100/50 rounded-xl">
-                                    <p className="text-[10px] text-blue-500 font-bold uppercase mb-0.5 leading-normal">安全库存缓冲 (SS)</p>
-                                    <p className="text-lg font-extrabold text-blue-700 font-mono">{Math.round(insight.safetyStock)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
+                                  <div className="p-3 bg-blue-50 border border-blue-100/50 rounded-xl flex flex-col justify-between">
+                                    <InfoTooltip
+                                      title="安全库存缓冲 (SS, Safety Stock)"
+                                      content="为化解物流迟延、工厂产能不足或短期出货量旺盛带来的断货危机，而建立的安全缓冲积蓄余量。公式：SS = 预测日均销量 × 安全缓冲天数。"
+                                      iconColorClass="text-blue-500/80 hover:text-blue-600"
+                                    >
+                                      <p className="text-[10px] text-blue-500 font-bold uppercase mb-0.5 leading-normal cursor-help">安全库存缓冲 (SS)</p>
+                                    </InfoTooltip>
+                                    <p className="text-lg font-extrabold text-blue-700 font-mono mt-0.5">{Math.round(insight.safetyStock)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
                                   </div>
-                                  <div className="p-3 bg-indigo-50 border border-indigo-100/50 rounded-xl">
-                                    <p className="text-[10px] text-indigo-500 font-bold uppercase mb-0.5 leading-normal">科学再订货点 (ROP)</p>
-                                    <p className="text-lg font-extrabold text-indigo-900 font-mono">{Math.round(insight.reorderPoint)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
+                                  <div className="p-3 bg-indigo-50 border border-indigo-100/50 rounded-xl flex flex-col justify-between">
+                                    <InfoTooltip
+                                      title="科学再订货点 (ROP, Reorder Point)"
+                                      content="采购起航的水位红线。当在库在途总可用库存等于或少于该值时，应立即开启大货下单，以承接补货期间的销售流速需求。公式：ROP = LTD + SS。"
+                                      iconColorClass="text-indigo-500/80 hover:text-indigo-600"
+                                    >
+                                      <p className="text-[10px] text-indigo-500 font-bold uppercase mb-0.5 leading-normal cursor-help">科学再订货点 (ROP)</p>
+                                    </InfoTooltip>
+                                    <p className="text-lg font-extrabold text-indigo-900 font-mono mt-0.5">{Math.round(insight.reorderPoint)} <span className="text-[10px] font-semibold text-slate-500">件</span></p>
                                   </div>
                                 </div>
 
@@ -3524,7 +3685,13 @@ export default function App() {
                                         <span className="text-[10px] font-bold uppercase tracking-wider text-slate-300">未来库存天级动态投影仿真</span>
                                       </div>
                                       <span className="text-[8px] px-1.5 py-0.5 bg-indigo-500/20 rounded font-bold text-indigo-300">
-                                        安全警戒线: {Math.round(insight.safetyStock)}
+                                        <InfoTooltip
+                                          title="安全警戒水位线 (SS)"
+                                          content="即安全库存缓冲水平。天级动态仿真中预测曲线降至此线之下时，说明您的库存缓冲开始受损，需格外防范断货风险。"
+                                          iconColorClass="text-indigo-300/80 hover:text-indigo-100"
+                                        >
+                                          <span>安全警戒线: {Math.round(insight.safetyStock)}</span>
+                                        </InfoTooltip>
                                       </span>
                                     </div>
                                     <div className="h-28 w-full text-[9px]">
@@ -3644,11 +3811,12 @@ export default function App() {
                               </motion.div>
                             )}
                           </AnimatePresence>
+                          </div>
                         </div>
                       );
                     })()
                   ) : (
-                    <div className="bg-slate-50 rounded-2xl p-8 text-center border-dashed border-2 border-slate-200 flex flex-col items-center justify-center text-slate-400 space-y-3">
+                    <div className="bg-slate-50 rounded-2xl p-8 text-center border-dashed border-2 border-slate-200 flex flex-col items-center justify-center text-slate-400 space-y-3 xl:h-full">
                       <Package size={36} className="text-slate-300 animate-pulse" />
                       <p className="text-sm font-semibold text-slate-800">点选特定 SKU 进行备货诊断</p>
                       <p className="text-xs max-w-[200px] leading-relaxed text-slate-400">

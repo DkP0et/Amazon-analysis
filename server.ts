@@ -298,7 +298,7 @@ async function startServer() {
         avgWeeklyOrders,
         avgWeeklySales,
         avgWeeklyCVR,
-        status: "5周前的历史报告已自动汇总压缩，为您极大地节省了 Token 指数消耗并提升了 AI 响应吞吐和速度。"
+        status: "5周前的历史报告已自动汇总压缩，为您极大地节省了 Token 指数消耗并提升了 AI 响应吞吐 and 速度。"
       },
       tokenSavingsPct
     };
@@ -334,7 +334,7 @@ async function startServer() {
       
       分析重点:
       1. 波动与多维归因 (重要): 如果是在数据中发现明显的趋势，请进行分析。
-
+      
       输出格式:
       {
         "summary": "一句话概括本期业绩现状及主导因素。",
@@ -423,7 +423,8 @@ async function startServer() {
       // ====== 科学库存推演模拟算法 ======
       const timelineSim = [];
       let currentSim = currentStock + rawMaterialStock;
-      let minInventory = currentSim; // 最低在库结存极值
+      let unflooredSim = currentStock + rawMaterialStock;
+      let minInventory = unflooredSim; // 最低在库结存极值 (基于理论供需计算用来推荐备货量)
       let outOfStockDayStart = -1;   // 开始断货天
       let outOfStockDayEnd = -1;     // 结束断货天
       let isOutOfStockEver = false;
@@ -434,97 +435,101 @@ async function startServer() {
       for (let d = 0; d <= simDaysLimit; d++) {
         if (d > 0) {
           currentSim -= avgDailySales;
+          unflooredSim -= avgDailySales;
           
           // Apply shipments arriving on day d
           if (hasBatches) {
-            inTransitBatches.forEach((batch: any) => {
-              if (Number(batch.arriveDays) === d) {
-                currentSim += (Number(batch.quantity) || 0);
+            inTransitBatches.forEach((b: any) => {
+              if (Number(b.arriveDays) === d) {
+                currentSim += Number(b.quantity) || 0;
+                unflooredSim += Number(b.quantity) || 0;
               }
             });
           } else {
-            // 到达第 Y 天，单批次在途到达
-            if (d === inTransitArriveDays) {
+            if (inTransitArriveDays === d) {
               currentSim += inTransitStock;
+              unflooredSim += inTransitStock;
             }
           }
-        }
-        
-        const roundedStock = Math.round(currentSim);
-        timelineSim.push({
-          day: d,
-          stock: roundedStock,
-          safetyLine: Math.round(safetyStock),
-        });
 
-        if (d > 0) {
-          if (currentSim < 0) {
-            outOfStockDaysCount++;
+          // Track shortage in targetCoverageDays
+          if (unflooredSim < minInventory && d <= targetCoverageDays) {
+            minInventory = unflooredSim;
+          }
+
+          const currentPhysical = Math.max(0, currentSim);
+          if (currentPhysical <= 0) {
             if (!isOutOfStockEver) {
-              outOfStockDayStart = d;
               isOutOfStockEver = true;
+              outOfStockDayStart = d;
             }
             outOfStockDayEnd = d;
+            outOfStockDaysCount++;
           }
-          // 在库结存最低点记录
-          minInventory = Math.min(minInventory, currentSim);
+
+          timelineSim.push({
+            day: d,
+            stock: currentPhysical,
+            unfloored: unflooredSim,
+          });
+        } else {
+          timelineSim.push({
+            day: 0,
+            stock: Math.max(0, currentSim),
+            unfloored: unflooredSim,
+          });
         }
       }
 
+      const maxShortageGap = minInventory < 0 ? Math.abs(minInventory) : 0;
+      const physicalMinInventory = Math.min(...timelineSim.map(t => t.stock));
+      
+      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + rawMaterialStock) / avgDailySales).toFixed(1)) : 0;
+      
+      const batchesDescription = hasBatches
+        ? inTransitBatches.map((b: any) => `${b.remark || '在途货件'}: ${b.quantity}件 (预计第 ${b.arriveDays} 天到仓)`).join(", ")
+        : `单个在途批次: ${inTransitStock}件, 预计第 ${inTransitArriveDays} 天到仓`;
+
+      // Suggested quantity calculation based on restockMode
       let suggestedQuantity = 0;
-      if (restockMode === "exclude") {
-        const existingTotal = currentStock + rawMaterialStock;
-        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * targetCoverageDays) - existingTotal));
-      } else if (restockMode === "include") {
-        const existingTotal = currentStock + rawMaterialStock + activeInTransitStock;
-        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * targetCoverageDays) - existingTotal));
+      if (restockMode === "simulated") {
+        suggestedQuantity = Math.max(0, Math.round(safetyStock - minInventory));
+      } else if (restockMode === "exclude") {
+        suggestedQuantity = Math.max(0, Math.round(leadTimeDemand + shipmentCycleDemand + safetyStock - (currentStock + rawMaterialStock)));
       } else {
-        // "simulated" 时间轴投射模式：使覆盖期内最低极值minInventory维持在安全库存safetyStock水位
-        suggestedQuantity = Math.max(0, Math.ceil(safetyStock - minInventory));
+        suggestedQuantity = Math.max(0, Math.round(leadTimeDemand + shipmentCycleDemand + safetyStock - (currentStock + rawMaterialStock + activeInTransitStock)));
       }
 
-      // Effective in-transit stock display
-      const effectiveInTransit = restockMode === "exclude" ? 0 : activeInTransitStock;
-      const existingTotalSelected = currentStock + rawMaterialStock + effectiveInTransit;
-      const daysOfSupply = avgDailySales > 0 ? Number((existingTotalSelected / avgDailySales).toFixed(1)) : 999;
-
-      const batchesDescription = hasBatches 
-        ? inTransitBatches.map((b: any, index: number) => `批次 ${index + 1}: ${b.remark || '未命名'} (${b.quantity}件，预计在未来第 ${b.arriveDays} 天到达上架)`).join("\n        - ")
-        : `无多分批 (传统单批次: ${inTransitStock} 件，预计在第 ${inTransitArriveDays} 天到仓。)`;
-
       const prompt = `
-        您是资深亚马逊供应链规划师与物流采购专家。请根据以下提供的 SKU 历史销售数据与当前库存参数，结合用户本案例下的特定流程（提前采购材料分装打包回仓库、按月合并统计发货），给出专业的备货与原材料采购分析建议。
+        您是资深亚马逊供应链规划师与物流采购专家。请根据以下提供的 SKU 历史销售数据与当前库存参数，给出极其专业、逻辑严密、多维度的备货与原材料采购分析建议。
         
-        【重要特性：防刻舟求剑的“库存动态时间轴模拟”已激活】
+        【重要特性：动态库存时间轴模拟 (Dynamic Timeline Simulation)】
         - 模拟模式：${restockMode === "simulated" ? "科学时间轴投影仿真模式 (Simulated Dynamic Projection)" : restockMode === "exclude" ? "保守排除在途模式 (Exclude In-transit)" : "常规计入在途模式 (Include In-transit)"}
-        - 我们不再认为“在途库存是瞬间落袋或合并在单一日期到达”的静态数值。系统已经连续每日仿真模拟了未来 90 天内、甚至是多批次细分成品在不同天数到达并入上架的库存流向！
         - 现有成品在库: ${currentStock} 件，现有可折成品的在库材料: ${rawMaterialStock} 件。
-        - 已经在途总库存: ${activeInTransitStock} 件。
-        - 已经分批在途到仓详情：
-        - ${batchesDescription}
-        - 日销售速度：${avgDailySales.toFixed(2)} 件/日
-        - 采购在仓分装周期（Lead Time）: ${leadTimeDays} 天。即今天拍板采购的备份，理应在 ${leadTimeDays} 天内打包分装完毕并出货。
-        - 整个模拟中，若没有任何新发采购：
-          * 极低点可用库存为：${minInventory.toFixed(1)} 件 ${minInventory < 0 ? "(出现负值，代表现有在库根本顶不住后续各批次在途货，或是各批次在途到达也补不齐前期的连续断货真空漏洞！)" : ""}
-          * 期间是否会发生断货：${isOutOfStockEver ? `是的，预计将在未来第 ${outOfStockDayStart} 天到第 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）发生断货真空期。` : "否，可用库存可全段平移覆盖。"}
-        - 目标总安全备备足天数: ${targetCoverageDays} 天
-        - 根据您选择的模式：本次建议最科学的原材料采购量为: ${suggestedQuantity} 件（本数值已由多波段时间流精密结存推算得出）。
+        - 已经出发并在途的物流总库存: ${activeInTransitStock} 件。
+        - 已经在途的多分批到仓详情：
+          - ${batchesDescription}
+        - 日销售均速 (Average Daily Sales): ${avgDailySales.toFixed(2)} 件/日
+        - 采购加工及头程到仓总周期 (Lead Time - LT): ${leadTimeDays} 天。即如果今天启动下单，新货物最快需要 ${leadTimeDays} 天才能变成 FBA 可售库存。
+        - 目标总安全备足天数: ${targetCoverageDays} 天（希望保障未来 ${targetCoverageDays} 天周转无忧）
+        - 在无新采购情况下，系统模拟未来 90 天以上的结存流向结果：
+          * 实际物理在库最低降至：${physicalMinInventory.toFixed(1)} 件 
+          * 是否会发生缺货/断货：${isOutOfStockEver ? `是。在未来第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）将面临库存见底，产生临时中断亏空。` : "否。系统仿真无断货断供风险。"}
+          * 在此期间最低结存（包含在途/可折材料在目标覆盖天数内的最低值）：${minInventory.toFixed(1)} 件 
 
-        【历史销售表现】
-        ${JSON.stringify(history.map((h: any) => ({ date: h.date, orders: h.orders, sessions: h.sessions })), null, 2)}
-
-        【供应链核心指标结果】
-        - 材料配送打包期需求 (LTD): ${leadTimeDemand} 件
-        - 安全库存水位 (SS): ${safetyStock} 件
-        - 再订货触发点 (ROP): ${reorderPoint} 件
-        - 当前可用维持周期: ${daysOfSupply} 天
-        - 建议本次采购备货数: ${suggestedQuantity} 件
-
-        【您的专业分析任务】
-        1. 深入剖析该 SKU 在这种“时间轴动态模拟（在途大货分为多批陆续到达，可能前期库存由于销量流速大面临中断、今天分装加工需要 ${leadTimeDays} 天前置期）”下的动态周转安全。
-        2. 特别针对“由于多批次在途到货时间间隔很大，在各批次到达入仓前，现有在库成品和材料是否足够支撑，以及是否会产生临时脱销真空期”进行针对性的双向交叉剖析！点出在途虽好但“远水不解近渴”的时间脱节点。如果存在临时断货，给卖家具体的提速或加急发快递合并解决脱销的对策。
-        3. 自适应输出采购排程指导：即在多长天数内必须完成在仓分装，或者应该在哪天之前提前买好下一批货，以使未来的各批次无缝连接，周转库存安全可控。
-        4. 务必严格以以下 JSON 形式返回结果，无需任何 code markdown 包装，JSON 格式如下：
+        请撰写一篇极其详尽、高参考价值的供应链报告作为 json 的 "explanation" 字段返回。请从以下四个方面深度剖析：
+        1. **【在库现货与在途时空对齐诊断】(Inventory & In-transit Temporal Alignment Diagnosis)**
+           - 点评当前在库现货 + 原材料库存（共 ${currentStock + rawMaterialStock} 件）能支撑多少天的周转，以及是否健康。点评当前已经配置的头程在途货量 ${activeInTransitStock} 的分布和时间差配合。
+        2. **【物理结存与供需缺口精确评估】(Physical Balance & Deficit Assessment)**
+           - 详细剖析在没有新采购动作的情况下，未来时间轴上何时会跌破安全水位（SS: ${safetyStock}件）和何时发生彻底断货，定量分析断供期和最高断货漏洞（${maxShortageGap.toFixed(0)} 件）。在临时断货时，给卖家具体的提速或加急发快递合并解决脱销的对策。
+        3. **【动态时间轴智能备货模型推演】(Dynamic Restocking Model Reasoning)**
+           - 阐述当前激活的 【${restockMode === "simulated" ? "时间轴投影仿真" : restockMode === "exclude" ? "排除在途" : "常规计入在途模式"}】 备货量计算的优越性，以及为何得出订货/原材料备货数 ${suggestedQuantity} 件之科学价值，对齐时间差以防漏补、重补或高危断存。
+        4. **【加急干预对策与滚动下单排程与分装执行】(Expedited Mitigation & Rolling Purchase Schedule)**
+           - 针对未来 ${isOutOfStockEver ? `第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）的物理断档断供期` : "整个周转覆盖周期"} 的物理供求真空期，给出具体的应急特快物流加急或工厂赶单对策。输出精确的备货与打包启动天数：卖家必须在未来的 **${Math.max(1, Math.floor(daysOfSupply - leadTimeDays))} 天内** 立即要求工厂打包、贴标或启动分装，否则由于总提前期 (Lead Time) 需要 ${leadTimeDays} 天，将面临灾难性断货与产品页面链接曝光权重暴跌。
+        5. **【供应链绩效与资金流平衡优化建议】(Supply Chain KPI & Cashflow Optimization)**
+           - 对该 SKU 的存货周转率 (Inventory Turnover Ratio)、持有成本 (Holding Cost)、断货机会成本 (Out-of-Stock Opportunity Cost) 进行财务与运营上的多维权衡博弈分析。
+            
+        务必严格以以下 JSON 形式返回结果，无需任何 code markdown 包装，JSON 格式如下：
         {
           "avgDailySales": 0,
           "leadTimeDemand": 0,
@@ -544,7 +549,14 @@ async function startServer() {
         );
 
         const parsed = JSON.parse(content);
-        parsed.targetCoverageDays = parsed.targetCoverageDays !== undefined ? Number(parsed.targetCoverageDays) : targetCoverageDays;
+        parsed.avgDailySales = avgDailySales;
+        parsed.leadTimeDemand = leadTimeDemand;
+        parsed.safetyStock = safetyStock;
+        parsed.reorderPoint = reorderPoint;
+        parsed.daysOfSupply = daysOfSupply;
+        parsed.suggestedQuantity = suggestedQuantity;
+        parsed.targetCoverageDays = targetCoverageDays;
+
         parsed.analyzedAt = new Date().toISOString();
         parsed.provider = provider;
         parsed.timelineSim = timelineSim; 
