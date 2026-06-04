@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+# Firebase 配置（含 projectId/apiKey，不应公开）
+firebase-applet-config.json
+# 本地数据库文件与备份
+data/
+*.backup_*
