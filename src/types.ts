@@ -36,6 +36,13 @@ export interface RestockInsight {
   targetCoverageDays: number;  // The supply coverage period used (e.g. 60 or 90 days)
   explanation: string;         // Professional AI-generated analysis of demand and delivery logic
   analyzedAt: string;          // Timestamp of calculations
+  // 以下字段为计算时记录的库存快照与仿真数据，运行时可能为 undefined（重构时按代码实际用法补充的可选类型）
+  currentStock?: number;
+  rawMaterialStock?: number;
+  inTransitStock?: number;
+  inTransitArriveDays?: number;
+  inTransitBatches?: InTransitBatch[];
+  timelineSim?: { day: number; [key: string]: any }[];
 }
 
 export interface SKUPerformance {
@@ -107,4 +114,13 @@ export interface AIInsight {
     primaryDriver: string;
     commentary: string;
   };
+}
+
+export interface SKUAnomaly {
+  sku: string;
+  type: 'SALES_DROP' | 'CVR_DROP' | 'TRAFFIC_SPIKE_NO_SALES' | 'LOW_STOCK';
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  description: string;
+  changeValue?: string;
 }
