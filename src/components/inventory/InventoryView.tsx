@@ -13,12 +13,15 @@ import { cn } from "../../lib/utils";
 import { InfoTooltip } from "../common/InfoTooltip";
 import { skuService } from "../../lib/skuService";
 import { SKUPerformance } from "../../types";
+import { computeRowMetrics, resolveAvgDailySales, resolveParams, computeTwoStage } from "../../lib/inventoryModel";
 
 interface BatchValues {
   inTransitArriveDays: string;
   leadTimeDays: string;
   safetyStockDays: string;
   inTransitStock: string;
+  shipmentCycleDays: string;
+  localStockCycles: string;
 }
 
 interface InventoryViewProps {
@@ -103,21 +106,14 @@ export function InventoryView({
               {/* KPI Summary Rows */}
               {(() => {
                 const currentStoreSkus = (Object.values(skuPerformance) as SKUPerformance[]).filter(s => s.storeId === activeStoreId);
-                const totalCurrent = currentStoreSkus.reduce((acc, curr) => acc + (curr.currentStock || 0), 0);
-                const totalInTransit = currentStoreSkus.reduce((acc, curr) => acc + (curr.inTransitStock || 0), 0);
+                const totalFba = currentStoreSkus.reduce((acc, curr) => acc + (curr.currentStock || 0), 0);
+                const totalLocal = currentStoreSkus.reduce((acc, curr) => acc + (curr.localStock ?? curr.rawMaterialStock ?? 0), 0);
                 const activeSkuCount = currentStoreSkus.length;
-                
-                // Count alerts: total stock (current + transit) is less than Reorder Point or safety stock
+
+                // 警戒 = 本期需要发往 FBA 的款数 (发往FBA > 0)
                 const alertCount = currentStoreSkus.filter(s => {
-                  const history = s.history || [];
-                  const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
-                  const totalDays = history.length * 7;
-                  const avgDailySales = totalDays > 0 ? (totalOrders / totalDays) : 0;
-                  const leadTimeDemand = avgDailySales * (s.leadTimeDays ?? 30);
-                  const safetyStock = avgDailySales * (s.safetyStockDays ?? 15);
-                  const reorderPoint = leadTimeDemand + safetyStock;
-                  const effectiveStock = (s.currentStock || 0) + (excludeInTransit ? 0 : (s.inTransitStock || 0));
-                  return effectiveStock < reorderPoint;
+                  const m = computeRowMetrics(s, restockTargetDays);
+                  return m.shipToFbaQty > 0 || m.daysUntilFbaStockout !== -1;
                 }).length;
 
                 return (
@@ -132,24 +128,24 @@ export function InventoryView({
 
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
                       <div className="space-y-1">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">当前在库在仓</span>
-                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{totalCurrent.toLocaleString()} 件</p>
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">FBA 可售合计</span>
+                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{totalFba.toLocaleString()} 件</p>
                       </div>
                       <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl"><Package size={20} /></div>
                     </div>
 
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
                       <div className="space-y-1">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">在途及入仓存货</span>
-                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{totalInTransit.toLocaleString()} 件</p>
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">本地成品合计</span>
+                        <p className="text-3xl font-extrabold text-slate-900 tracking-tight">{totalLocal.toLocaleString()} 件</p>
                       </div>
                       <div className="p-3 bg-blue-50 text-blue-600 rounded-xl"><RefreshCw size={20} /></div>
                     </div>
 
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
                       <div className="space-y-1">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">备货缺发警戒款数</span>
-                        <p className="text-3xl font-extrabold text-rose-600 tracking-tight">{alertCount} 提警</p>
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">需发往 FBA 款数</span>
+                        <p className="text-3xl font-extrabold text-rose-600 tracking-tight">{alertCount} 款</p>
                       </div>
                       <div className={cn(
                         "p-3 rounded-xl",
@@ -246,6 +242,37 @@ export function InventoryView({
                               className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
                             />
                           </div>
+                          <div className="space-y-1">
+                            <InfoTooltip
+                              title="发货周期天数 (Shipment Cycle)"
+                              content="你大约多久发一次货去 FBA（如 30 天发一次）。影响发往 FBA 和采购回仓两个建议量的覆盖期。"
+                            >
+                              <label className="text-[10px] font-bold text-slate-500 cursor-help block">发货周期 (天)</label>
+                            </InfoTooltip>
+                            <input 
+                              type="number" 
+                              placeholder="如 30"
+                              value={batchValues.shipmentCycleDays}
+                              onChange={(e) => setBatchValues(prev => ({ ...prev, shipmentCycleDays: e.target.value }))}
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <InfoTooltip
+                              title="本地常备周期数 (Local Stock Cycles)"
+                              content="本地仓库常备几个发货周期的成品。1 = 滚动补货不囤(资金压力小); 长尾 SKU 可调高为 2~3 一次多囤几批。"
+                            >
+                              <label className="text-[10px] font-bold text-slate-500 cursor-help block">本地常备周期数</label>
+                            </InfoTooltip>
+                            <input 
+                              type="number" 
+                              min={1}
+                              placeholder="如 1"
+                              value={batchValues.localStockCycles}
+                              onChange={(e) => setBatchValues(prev => ({ ...prev, localStockCycles: e.target.value }))}
+                              className="w-full bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 text-xs outline-none text-slate-800 placeholder:text-slate-400 font-medium font-mono font-sans"
+                            />
+                          </div>
                         </div>
 
                         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pt-2 border-t border-slate-100">
@@ -253,7 +280,7 @@ export function InventoryView({
                           <div className="flex gap-2 self-end sm:self-auto">
                             <button
                               onClick={() => {
-                                setBatchValues({ inTransitArriveDays: "", leadTimeDays: "", safetyStockDays: "", inTransitStock: "" });
+                                setBatchValues({ inTransitArriveDays: "", leadTimeDays: "", safetyStockDays: "", inTransitStock: "", shipmentCycleDays: "", localStockCycles: "" });
                                 showToast("已清空输入项");
                               }}
                               className="px-2.5 py-1 text-[10px] font-bold text-slate-500 hover:text-slate-800 transition-colors"
@@ -288,44 +315,53 @@ export function InventoryView({
                           </th>
                           <th className="py-4 px-3 text-center">
                             <InfoTooltip
-                              title="当前在库库存 (Current On-hand)"
-                              content="海外亚马逊 FBA 实货在库数量 + 本地原材料待打包成品库存（如已录入）。这是您随时可见的物理安全成品现货。"
+                              title="FBA 可售库存 (Current On-hand)"
+                              content="亚马逊 FBA 端的实货可售数量。这是顾客下单时实际能发货的库存。"
                               position="bottom"
                             >
-                              <span>当前在库</span>
+                              <span>FBA可售</span>
                             </InfoTooltip>
                           </th>
                           <th className="py-4 px-3 text-center">
                             <InfoTooltip
-                              title="在途数量 (In-transit Stock)"
-                              content="已经成箱下线、采购付发或处于跨境船运/空运等前置运输途中的集装箱内货物，短期内即将解冻变成可售件数。"
+                              title="去 FBA 在途 (In-transit to FBA)"
+                              content="已经从你本地仓库发出、正在运往亚马逊 FBA 途中的货。到仓后即变为 FBA 可售。"
                               position="bottom"
                             >
-                              <span>在途数量</span>
+                              <span>去FBA在途</span>
                             </InfoTooltip>
                           </th>
                           <th className="py-4 px-3 text-center">
                             <InfoTooltip
-                              title="在途到仓天数 (Transit Days)"
-                              content="已经在物流途中的这批货物，预计还需运输漂流多少个天数，才能完成目的港清关、陆运派送，被海外 FBA 仓签收并完全上架变为可售件数。"
+                              title="本地仓库成品 (Local Finished Goods)"
+                              content="你本地仓库里已经包装好、随时可以发往 FBA 的成品数量。发往 FBA 的货就是从这里发出。"
                               position="bottom"
                             >
-                              <span>在途到仓(天)</span>
+                              <span>本地成品</span>
                             </InfoTooltip>
                           </th>
                           <th className="py-4 px-3 text-center">
                             <InfoTooltip
-                              title="头程前置天数 (Lead Time - LT)"
-                              content="从计划向工厂下单、备料排单生产、国内陆运发货、海外海运漂洋、目的港清关、卡派送仓至完全上架的期望累计总响应天数。"
+                              title="去 FBA 在途到仓天数"
+                              content="本地发出的货运到 FBA 并完成上架变为可售，预计还需多少天。"
                               position="bottom"
                             >
-                              <span>头程前置(天)</span>
+                              <span>到仓(天)</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="采购到可发货天数 (Procurement Lead Time)"
+                              content="从下采购单到货物到本地仓库、包装好可以发往 FBA 的合并前置天数。"
+                              position="bottom"
+                            >
+                              <span>采购前置(天)</span>
                             </InfoTooltip>
                           </th>
                           <th className="py-4 px-3 text-center">
                             <InfoTooltip
                               title="安全缓冲天数 (Safety Stock Days - SS)"
-                              content="为应对因清关滞留、旺季塞港甩箱、排仓、海运延误或突发的销量暴涨等异常状况，预备建立的缓冲天数，防止因外部被动断货导致排名流失。"
+                              content="为应对清关滞留、旺季塞港、海运延误或销量暴涨等异常，预备的缓冲天数，防止被动断货流失排名。"
                               position="bottom"
                             >
                               <span>安全缓冲(天)</span>
@@ -333,14 +369,41 @@ export function InventoryView({
                           </th>
                           <th className="py-4 px-3 text-center">
                             <InfoTooltip
-                              title="剩余周转天数 (Days of Supply)"
-                              content="通过对最近数周的平均流速进行日历加权动态平滑后，当前的总在库在仓可用现货还足够支撑您卖多少天。反映库存库容健康度的敏感指标。"
+                              title="本地常备周期数 (Local Stock Cycles)"
+                              content="本地仓库希望常备多少个发货周期的成品。1 = 滚动补货不囤(发走后再采购下一批, 资金压力小); 销量小的长尾 SKU 可调高为 2~3, 一次多囤几批省得频繁下单。"
                               position="bottom"
                             >
-                              <span>剩余周转</span>
+                              <span>常备周期</span>
                             </InfoTooltip>
                           </th>
-                          <th className="py-4 px-4 text-right">补货操作</th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="距离 FBA 断货 (Days Until Stockout)"
+                              content="如果什么都不做, FBA 端预计第几天卖到 0。已考虑去 FBA 在途货物的到仓时点(逐日仿真)。这是判断'急不急'的指标。"
+                              position="bottom"
+                            >
+                              <span>距离断货</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="本期发往 FBA (Ship to FBA)"
+                              content="这次该从本地成品里发多少去亚马逊, 让 FBA 端撑过(发货周期+到仓天数+安全缓冲)。受本地成品约束, 不够发会提示。这是判断'发多少'的指标。"
+                              position="bottom"
+                            >
+                              <span>发往FBA</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-3 text-center">
+                            <InfoTooltip
+                              title="本期采购回仓 (Procure)"
+                              content="本地仓库这次该补采购多少成品。按你设的'常备周期数'恢复本地水位, 并覆盖采购前置期消耗。"
+                              position="bottom"
+                            >
+                              <span>采购回仓</span>
+                            </InfoTooltip>
+                          </th>
+                          <th className="py-4 px-4 text-right">操作</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs">
@@ -349,7 +412,7 @@ export function InventoryView({
                           if (currentStoreSkus.length === 0) {
                             return (
                               <tr>
-                                <td colSpan={7} className="py-12 text-center text-slate-400">
+                                <td colSpan={11} className="py-12 text-center text-slate-400">
                                   暂无 SKU 数据。请先前往 “数据导入” 页面上传销售与在库 CSV/TXT 文件。
                                 </td>
                               </tr>
@@ -377,29 +440,24 @@ export function InventoryView({
                           };
 
                           return currentStoreSkus.map(s => {
-                            const history = s.history || [];
-                            const totalOrders = history.reduce((sum, h) => sum + (h.orders || 0), 0);
-                            const totalDays = history.length * 7;
-                            const avgDailySales = totalDays > 0 ? (totalOrders / totalDays) : 0.01;
-                            
-                            const currentStock = s.currentStock ?? 0;
-                            const inTransitStock = s.inTransitStock ?? 0;
+                            const avgDailySales = resolveAvgDailySales(s);
+
+                            const currentStock = s.currentStock ?? 0;        // FBA 可售
+                            const localStock = s.localStock ?? s.rawMaterialStock ?? 0; // 本地仓库成品
+                            const inTransitStock = s.inTransitStock ?? 0;     // 去 FBA 在途
                             const leadTimeDays = s.leadTimeDays ?? 30;
                             const safetyStockDays = s.safetyStockDays ?? 15;
-                            
-                            const leadTimeDemand = avgDailySales * leadTimeDays;
-                            const safetyStock = avgDailySales * safetyStockDays;
-                            const reorderPoint = leadTimeDemand + safetyStock;
-                            
-                            const effectiveInTransit = (restockMode === 'exclude' || excludeInTransit) ? 0 : inTransitStock;
-                            const totalRawStock = s.rawMaterialStock ?? 0;
-                            const daysOfSupply = avgDailySales > 0 ? ((currentStock + totalRawStock + effectiveInTransit) / avgDailySales) : 0;
-                            const totalInvCurrent = currentStock + totalRawStock + effectiveInTransit;
-                            const isBelowROP = totalInvCurrent < reorderPoint;
+
+                            // 两段式补货决策 + FBA 真实断货天数 (全局统一计算)
+                            const m = computeRowMetrics(s, restockTargetDays);
+                            const shipToFbaQty = m.shipToFbaQty;
+                            const shipToFbaConstrained = m.shipToFbaConstrained;
+                            const procureQty = m.procureQty;
+                            const daysUntilStockout = m.daysUntilFbaStockout; // -1 表示覆盖期内不断货
 
                             return (
                               <tr 
-                                key={`${s.sku}_${currentStock}_${inTransitStock}_${s.inTransitArriveDays ?? 15}_${leadTimeDays}_${safetyStockDays}`} 
+                                key={`${s.sku}_${currentStock}_${localStock}_${inTransitStock}_${s.inTransitArriveDays ?? 15}_${leadTimeDays}_${safetyStockDays}_${s.localStockCycles ?? 1}`} 
                                 className={cn(
                                   "transition-all cursor-pointer group",
                                   restockSku === s.sku ? "bg-indigo-100/60 shadow-[inset_0_1px_0_0_rgba(165,180,252,0.4),_inset_0_-1px_0_0_rgba(165,180,252,0.4)]" : "hover:bg-slate-50/70"
@@ -468,6 +526,21 @@ export function InventoryView({
                                   </div>
                                 </td>
 
+                                {/* Local warehouse finished goods */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1">
+                                    <input 
+                                      type="number" 
+                                      defaultValue={localStock} 
+                                      onBlur={(e) => handleInstantSaveField(s, 'localStock', parseInt(e.target.value) || 0)}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="w-16 bg-emerald-50/40 border border-emerald-200/60 focus:bg-white focus:border-emerald-500 rounded px-1.5 py-1 text-center font-semibold text-emerald-800 outline-none text-xs"
+                                      title="本地仓库已包装好、随时可发往 FBA 的成品数量"
+                                    />
+                                    {savingSku === `${s.sku}_localStock` && <Loader2 size={10} className="text-emerald-400 animate-spin" />}
+                                  </div>
+                                </td>
+
                                 {/* In transit arrive prediction days */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                                   <div className="inline-flex items-center gap-1">
@@ -482,7 +555,7 @@ export function InventoryView({
                                   </div>
                                 </td>
 
-                                {/* Lead Time Days */}
+                                {/* Procurement Lead Days (reuse leadTimeDays field) */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
                                   <div className="inline-flex items-center gap-1">
                                     <input 
@@ -491,6 +564,7 @@ export function InventoryView({
                                       onBlur={(e) => handleInstantSaveField(s, 'leadTimeDays', parseInt(e.target.value) || 0)}
                                       onClick={(e) => e.stopPropagation()}
                                       className="w-12 bg-slate-50 border border-slate-200 focus:bg-white focus:border-indigo-500 rounded px-1.5 py-1 text-center text-slate-600 outline-none text-xs"
+                                      title="从下采购单到货物可发往 FBA 的合并前置天数"
                                     />
                                     {savingSku === `${s.sku}_leadTimeDays` && <Loader2 size={10} className="text-slate-400 animate-spin" />}
                                   </div>
@@ -510,49 +584,86 @@ export function InventoryView({
                                   </div>
                                 </td>
 
-                                {/* Days of Supply */}
+                                {/* Local stock cycles */}
                                 <td className="py-4 px-3 text-center whitespace-nowrap">
-                                  <span className={cn(
-                                    "px-2 py-1 rounded-full text-[10px] font-extrabold border block w-16 mx-auto text-center",
-                                    daysOfSupply >= 45 ? "bg-emerald-50 text-emerald-600 border-emerald-100" :
-                                    daysOfSupply >= 15 ? "bg-amber-50 text-amber-600 border-amber-100" :
-                                    "bg-rose-50 text-rose-600 border-rose-100 animate-pulse"
-                                  )}>
-                                    {daysOfSupply > 180 ? "180+ 天" : `${Math.round(daysOfSupply)} 天`}
-                                  </span>
-                                  {excludeInTransit ? (
-                                    <span className="text-[9px] text-amber-600 font-bold block mt-1" title="当前已启用已屏蔽在途，仅计算在库及原材料实载可卖周期">
-                                      (剔除在途款)
+                                  <div className="inline-flex items-center gap-1">
+                                    <input 
+                                      type="number" 
+                                      min={1}
+                                      defaultValue={s.localStockCycles ?? 1} 
+                                      onBlur={(e) => handleInstantSaveField(s, 'localStockCycles', Math.max(1, parseInt(e.target.value) || 1))}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="w-12 bg-violet-50/50 border border-violet-200/60 focus:bg-white focus:border-violet-500 rounded px-1.5 py-1 text-center font-semibold text-violet-700 outline-none text-xs"
+                                      title="本地常备几个发货周期。1=滚动补货不囤; 长尾 SKU 调高一次多囤几批"
+                                    />
+                                    {savingSku === `${s.sku}_localStockCycles` && <Loader2 size={10} className="text-violet-400 animate-spin" />}
+                                  </div>
+                                </td>
+
+                                {/* Days until FBA stockout */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  {daysUntilStockout === -1 ? (
+                                    <span className="px-2 py-1 rounded-full text-[10px] font-extrabold border block w-16 mx-auto text-center bg-emerald-50 text-emerald-600 border-emerald-100" title="覆盖期内 FBA 端不会断货">
+                                      充足
                                     </span>
                                   ) : (
-                                    <span className="text-[9px] text-indigo-600 font-bold block mt-1" title="通过多时间轴精算仿真中">
-                                      (时间轴仿真)
+                                    <span className={cn(
+                                      "px-2 py-1 rounded-full text-[10px] font-extrabold border block w-16 mx-auto text-center",
+                                      daysUntilStockout >= 45 ? "bg-emerald-50 text-emerald-600 border-emerald-100" :
+                                      daysUntilStockout >= 15 ? "bg-amber-50 text-amber-600 border-amber-100" :
+                                      "bg-rose-50 text-rose-600 border-rose-100 animate-pulse"
+                                    )} title="如果什么都不做, FBA 端预计第几天卖到 0 (已含去 FBA 在途到货)">
+                                      {daysUntilStockout} 天
                                     </span>
+                                  )}
+                                </td>
+
+                                {/* Ship to FBA */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  {shipToFbaQty > 0 ? (
+                                    <div className="inline-flex flex-col items-center gap-0.5">
+                                      <span className="px-2.5 py-1 rounded-lg text-xs font-extrabold bg-indigo-600 text-white block min-w-[3rem] text-center">
+                                        {shipToFbaQty}
+                                      </span>
+                                      {shipToFbaConstrained && (
+                                        <span className="text-[9px] text-rose-500 font-bold" title="本地成品不足以发出建议量, 需先采购补充本地成品">
+                                          本地不足
+                                        </span>
+                                      )}
+                                    </div>
+                                  ) : shipToFbaConstrained ? (
+                                    <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-rose-50 text-rose-600 border border-rose-100 inline-block" title="FBA 需要补货, 但本地成品为 0, 无货可发, 需先采购">
+                                      本地不足
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 font-medium">暂无需</span>
+                                  )}
+                                </td>
+
+                                {/* Procure to local */}
+                                <td className="py-4 px-3 text-center whitespace-nowrap">
+                                  {procureQty > 0 ? (
+                                    <span className="px-2.5 py-1 rounded-lg text-xs font-extrabold bg-emerald-600 text-white block min-w-[3rem] mx-auto text-center">
+                                      {procureQty}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 font-medium">暂无需</span>
                                   )}
                                 </td>
 
                                 {/* Action trigger */}
                                 <td className="py-4 px-4 text-right whitespace-nowrap">
                                   <div className="flex justify-end items-center gap-1.5">
-                                    {isBelowROP ? (
-                                      <span className="text-[10px] font-bold bg-amber-500/10 text-amber-600 px-1.5 py-0.5 rounded border border-amber-500/20 mr-1 text-center" title={`科学安全水位再订货点: ${reorderPoint.toFixed(0)}件`}>
-                                        提警采购(ROP:{Math.round(reorderPoint)}件)
-                                      </span>
-                                    ) : (
-                                      <span className="text-[10px] font-medium text-slate-400 mr-2">
-                                        水位健全
-                                      </span>
-                                    )}
                                     <button 
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         handleRestockAnalyze(s);
                                       }}
                                       className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-[11px] rounded-lg shadow-sm hover:shadow-xs transition-all flex items-center gap-1 shrink-0"
-                                      title="结合采购头程与销售流速进行AI供应链补货精确数学测算"
+                                      title="打开详情: 时间轴仿真曲线 + AI 与本地模型建议量对比"
                                     >
                                       <BrainCircuit size={12} />
-                                      AI 备货分析
+                                      详情/AI
                                     </button>
                                   </div>
                                 </td>
@@ -574,19 +685,19 @@ export function InventoryView({
                       const hasResult = !!insight;
                       const isStale = hasResult && (
                         sObj.currentStock !== (insight.currentStock ?? sObj.currentStock) ||
-                        sObj.rawMaterialStock !== (insight.rawMaterialStock ?? sObj.rawMaterialStock) ||
+                        (sObj.localStock ?? sObj.rawMaterialStock ?? 0) !== (insight.localStock ?? sObj.localStock ?? sObj.rawMaterialStock ?? 0) ||
                         sObj.inTransitStock !== (insight.inTransitStock ?? sObj.inTransitStock) ||
                         JSON.stringify(sObj.inTransitBatches || []) !== JSON.stringify(insight.inTransitBatches || [])
                       );
                       
                       const h = sObj.history || [];
-                      const tot = h.reduce((sum, item) => sum + (item.orders || 0), 0);
-                      const days = h.length * 7;
-                      const localAvg = days > 0 ? (tot / days) : 1;
+                      const localAvg = resolveAvgDailySales(sObj);
                       const currentStock = sObj.currentStock ?? 0;
                       const inTransitStock = sObj.inTransitStock ?? 0;
-                      const effectiveInTransit = excludeInTransit ? 0 : inTransitStock;
-                      const localReplenish = Math.max(0, Math.ceil((localAvg * restockTargetDays) - currentStock - effectiveInTransit));
+                      const localStock = sObj.localStock ?? sObj.rawMaterialStock ?? 0;
+                      // 本地两段式模型 (确定性), 用于空态估算 + 与 AI 结果对比
+                      const localModel = computeTwoStage(resolveParams(sObj), restockTargetDays);
+                      const localReplenish = localModel.procureQty;
 
                       return (
                         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col xl:h-full">
@@ -912,14 +1023,46 @@ export function InventoryView({
                                   </div>
                                 )}
 
-                                {/* Procurement advise card */}
-                                <div className="p-5 bg-gradient-to-br from-indigo-50 to-slate-50 rounded-2xl border border-indigo-100 text-center space-y-1 relative overflow-hidden">
-                                  <div className="absolute top-0 right-0 p-1 bg-indigo-600 text-white rounded-bl-lg text-[8px] uppercase tracking-wider font-extrabold">科学采购量</div>
-                                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">推荐备货采购数量</p>
-                                  <p className="text-3xl font-black text-indigo-700 font-mono tracking-tight">{insight.suggestedQuantity.toLocaleString()} <span className="text-xs font-bold">件</span></p>
-                                  <p className="text-[10px] font-medium text-slate-400 leading-normal">
-                                    支撑后续目标 {insight.targetCoverageDays} 天良性周转的建议净采购值
-                                  </p>
+                                {/* Two-stage decision cards */}
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100 text-center space-y-1">
+                                    <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">本期发往 FBA</p>
+                                    <p className="text-3xl font-black text-indigo-700 font-mono tracking-tight">{(insight.shipToFbaQty ?? 0).toLocaleString()} <span className="text-xs font-bold">件</span></p>
+                                    {insight.shipToFbaConstrained ? (
+                                      <p className="text-[10px] font-bold text-rose-500 leading-normal">本地成品不足, 需先采购补充本地</p>
+                                    ) : (
+                                      <p className="text-[10px] font-medium text-slate-400 leading-normal">从本地成品发出, 让 FBA 撑过发货周期+到仓+安全缓冲</p>
+                                    )}
+                                  </div>
+                                  <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 text-center space-y-1">
+                                    <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">本期采购回仓</p>
+                                    <p className="text-3xl font-black text-emerald-700 font-mono tracking-tight">{(insight.procureQty ?? insight.suggestedQuantity ?? 0).toLocaleString()} <span className="text-xs font-bold">件</span></p>
+                                    <p className="text-[10px] font-medium text-slate-400 leading-normal">补本地成品到常备 {sObj.localStockCycles ?? 1} 个发货周期</p>
+                                  </div>
+                                </div>
+
+                                {/* FBA stockout + AI vs local comparison */}
+                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-2 text-[11px]">
+                                  <div className="flex justify-between text-slate-600">
+                                    <span>FBA 距离断货 (逐日仿真):</span>
+                                    <span className={cn("font-mono font-bold", (insight.daysUntilFbaStockout ?? -1) === -1 ? "text-emerald-600" : (insight.daysUntilFbaStockout ?? 99) < 15 ? "text-rose-600" : "text-amber-600")}>
+                                      {(insight.daysUntilFbaStockout ?? -1) === -1 ? "覆盖期内充足" : `第 ${insight.daysUntilFbaStockout} 天`}
+                                    </span>
+                                  </div>
+                                  <div className="border-t border-slate-200 pt-2">
+                                    <p className="font-bold text-slate-500 mb-1.5 uppercase text-[9px] tracking-wider">AI 结果 vs 本地数学模型 (采购回仓)</p>
+                                    <div className="flex justify-between text-slate-600">
+                                      <span>本次诊断 ({insight.explanation && insight.explanation.includes("本地") ? "本地模型" : "AI 模型"}):</span>
+                                      <span className="font-mono font-bold text-indigo-700">{(insight.procureQty ?? insight.suggestedQuantity ?? 0).toLocaleString()} 件</span>
+                                    </div>
+                                    <div className="flex justify-between text-slate-600">
+                                      <span>本地确定性模型基准:</span>
+                                      <span className="font-mono font-bold text-slate-700">{localModel.procureQty.toLocaleString()} 件</span>
+                                    </div>
+                                    {Math.abs((insight.procureQty ?? insight.suggestedQuantity ?? 0) - localModel.procureQty) > Math.max(5, localModel.procureQty * 0.1) && (
+                                      <p className="text-[10px] text-amber-600 font-bold mt-1">两者差异较大, 建议以本地确定性模型为准核对。</p>
+                                    )}
+                                  </div>
                                 </div>
 
                                 {/* Analytical advisory from AI */}
@@ -956,29 +1099,22 @@ export function InventoryView({
                                 </div>
                                 
                                 <div className="w-full bg-slate-50 border border-slate-100 rounded-xl p-4 text-left text-[11px] space-y-1.5">
-                                  <p className="font-bold text-slate-500 mb-1.5 uppercase text-[9px] tracking-wider">即时物理模型估算 (基于历史日均值):</p>
-                                  {excludeInTransit && (
-                                    <div className="text-[10px] text-amber-600 font-bold bg-amber-500/10 border border-amber-500/15 px-2 py-1 rounded mb-2">
-                                      ⚠️ 注意：已屏蔽在途数量 (${inTransitStock} 件)，仅计算在库实物现载供求，用于提前采购下期原料。
-                                    </div>
-                                  )}
+                                  <p className="font-bold text-slate-500 mb-1.5 uppercase text-[9px] tracking-wider">即时两段式估算 (基于历史日均):</p>
                                   <div className="flex justify-between text-slate-600">
                                     <span>历史日均销售速度:</span>
                                     <span className="font-mono font-bold text-slate-800">{localAvg.toFixed(2)} 件/日</span>
                                   </div>
                                   <div className="flex justify-between text-slate-600">
-                                    <span>目标备货周转天数:</span>
-                                    <span className="font-mono font-bold text-indigo-600">{restockTargetDays} 天</span>
+                                    <span>FBA 距离断货:</span>
+                                    <span className="font-mono font-bold text-slate-800">{localModel.daysUntilFbaStockout === -1 ? "充足" : `第 ${localModel.daysUntilFbaStockout} 天`}</span>
                                   </div>
                                   <div className="flex justify-between text-slate-600">
-                                    <span>计算时扣除在途:</span>
-                                    <span className={cn("font-bold text-xs", excludeInTransit ? "text-amber-600" : "text-slate-500")}>
-                                      {excludeInTransit ? "是 (剔除在途)" : "否 (计入在途)"}
-                                    </span>
+                                    <span>本期发往 FBA:</span>
+                                    <span className="font-mono font-bold text-indigo-700">{localModel.shipToFbaQty} 件{localModel.shipToFbaConstrained ? " (本地不足)" : ""}</span>
                                   </div>
                                   <div className="flex justify-between border-t border-slate-200 pt-1.5 mt-1 font-bold text-slate-800">
-                                    <span>本批建议备货量:</span>
-                                    <span className="font-mono text-indigo-700">{localReplenish} 件</span>
+                                    <span>本期采购回仓:</span>
+                                    <span className="font-mono text-emerald-700">{localReplenish} 件</span>
                                   </div>
                                 </div>
                               </motion.div>

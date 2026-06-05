@@ -155,7 +155,7 @@ export async function getSkus(storeId?: string): Promise<SKU[]> {
 export async function saveSku(skuData: SKU): Promise<SKU> {
   const firestore = getDb();
   const docId = `${skuData.storeId}_${skuData.sku}`;
-  const dataToSave = { ...skuData, lastUpdated: new Date().toISOString() };
+  const dataToSave: SKU = { ...skuData, lastUpdated: new Date().toISOString() };
   delete dataToSave.analysisLoading;
 
   await firestore.collection("skus").doc(docId).set(dataToSave, { merge: true });
@@ -174,7 +174,7 @@ export async function bulkSaveSkus(skus: SKU[]): Promise<number> {
     chunk.forEach((sku) => {
       if (!sku.sku || !sku.storeId) return;
       const docId = `${sku.storeId}_${sku.sku}`;
-      const dataToSave = { ...sku, lastUpdated: new Date().toISOString() };
+      const dataToSave: SKU = { ...sku, lastUpdated: new Date().toISOString() };
       delete dataToSave.analysisLoading;
       batch.set(firestore.collection("skus").doc(docId), dataToSave, { merge: true });
       savedCount++;

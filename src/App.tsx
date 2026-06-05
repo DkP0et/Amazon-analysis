@@ -8,6 +8,7 @@ import { WeeklyData, InventoryData, SKUPerformance, AIInsight, Store, OperationA
 import { skuService } from "./lib/skuService";
 import { cn } from "./lib/utils";
 import { detectEncodingAndParse } from "./lib/csvParser";
+import { resolveParams, computeTwoStage } from "./lib/inventoryModel";
 import { InfoTooltip } from "./components/common/InfoTooltip";
 import { InventoryView } from "./components/inventory/InventoryView";
 import { DashboardView } from "./components/dashboard/DashboardView";
@@ -86,7 +87,9 @@ export default function App() {
     inTransitArriveDays: "",
     leadTimeDays: "",
     safetyStockDays: "",
-    inTransitStock: ""
+    inTransitStock: "",
+    shipmentCycleDays: "",
+    localStockCycles: ""
   });
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ sales: boolean; inventory: boolean }>({ sales: false, inventory: false });
@@ -148,6 +151,10 @@ export default function App() {
       currentStock: skuPerf.currentStock ?? 0,
       inTransitStock: skuPerf.inTransitStock ?? 0,
       rawMaterialStock: skuPerf.rawMaterialStock ?? 0,
+      localStock: skuPerf.localStock ?? skuPerf.rawMaterialStock ?? 0,
+      procurementLeadDays: skuPerf.procurementLeadDays ?? skuPerf.leadTimeDays ?? 30,
+      localStockCycles: skuPerf.localStockCycles ?? 1,
+      shipmentCycleDays: skuPerf.shipmentCycleDays ?? 30,
       inTransitArriveDays: skuPerf.inTransitArriveDays ?? 15,
       inTransitBatches: skuPerf.inTransitBatches || [],
       leadTimeDays: skuPerf.leadTimeDays ?? 30,
@@ -225,76 +232,32 @@ export default function App() {
       const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
       const reorderPoint = Number((leadTimeDemand + safetyStock).toFixed(2));
 
-      // Timeline simulator
-      const timelineSim = [];
-      let currentSim = currentStock + rawMaterialStock;
-      let unflooredSim = currentStock + rawMaterialStock;
-      let minInventory = unflooredSim;
-      let outOfStockDayStart = -1;
-      let outOfStockDayEnd = -1;
-      let isOutOfStockEver = false;
-      let outOfStockDaysCount = 0;
-
+      // ===== 统一两段式模型 (与列表/服务端同源) =====
+      const twoStageParams = resolveParams(skuWithParams);
+      const twoStage = computeTwoStage(twoStageParams, restockTargetDays);
+      const timelineSim = twoStage.fbaTimeline; // 已修复: 物理库存封底, 断货不结转负债
       const simDaysLimit = Math.max(90, restockTargetDays);
-      for (let d = 0; d <= simDaysLimit; d++) {
-        if (d > 0) {
-          currentSim -= avgDailySales;
-          unflooredSim -= avgDailySales;
-          if (hasBatches) {
-            inTransitBatches.forEach(batch => {
-              if (Number(batch.arriveDays) === d) {
-                const qty = Number(batch.quantity) || 0;
-                currentSim += qty;
-                unflooredSim += qty;
-              }
-            });
-          } else {
-            if (d === inTransitArriveDays) {
-              currentSim += inTransitStock;
-              unflooredSim += inTransitStock;
-            }
-          }
 
-          // 物理实际库存不会为负数，扣减到 0 为止
-          if (currentSim < 0) {
-            currentSim = 0;
-          }
-        }
-        timelineSim.push({
-          day: d,
-          stock: Math.round(currentSim),
-          safetyLine: Math.round(safetyStock),
-        });
+      // 断货窗口信息 (供解释文案使用)
+      const isOutOfStockEver = twoStage.daysUntilFbaStockout !== -1;
+      const outOfStockDayStart = twoStage.daysUntilFbaStockout;
+      const stockoutEndPoint = timelineSim.filter(t => t.stock <= 0).map(t => t.day);
+      const outOfStockDayEnd = stockoutEndPoint.length > 0 ? stockoutEndPoint[stockoutEndPoint.length - 1] : -1;
+      const outOfStockDaysCount = stockoutEndPoint.length;
+      const minInventory = Math.min(...timelineSim.map(t => t.stock));
 
-        if (d > 0) {
-          // 断货判断使用未封底的理论供需缺口（代表实际流失或断货）
-          if (unflooredSim < 0) {
-            outOfStockDaysCount++;
-            if (!isOutOfStockEver) {
-              outOfStockDayStart = d;
-              isOutOfStockEver = true;
-            }
-            outOfStockDayEnd = d;
-          }
-          if (d <= restockTargetDays) {
-            if (unflooredSim < minInventory) {
-              minInventory = unflooredSim;
-            }
-          }
-        }
-      }
+      // 两个核心决策
+      const shipToFbaQty = twoStage.shipToFbaQty;
+      const procureQty = twoStage.procureQty;
+      // 本地模型给出的"本批采购建议量"以采购回仓为准
+      const suggestedQuantity = procureQty;
 
-      let suggestedQuantity = 0;
-      if (activeMode === 'exclude') {
-        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock)));
-      } else if (activeMode === 'include') {
-        suggestedQuantity = Math.max(0, Math.ceil((avgDailySales * restockTargetDays) - (currentStock + rawMaterialStock + activeInTransitStock)));
-      } else {
-        suggestedQuantity = Math.max(0, Math.ceil(safetyStock - minInventory));
-      }
-
-      const effectiveInTransit = activeMode === 'exclude' ? 0 : activeInTransitStock;
-      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + rawMaterialStock + effectiveInTransit) / avgDailySales).toFixed(1)) : 999;
+      const effectiveInTransit = activeInTransitStock;
+      const localStock = twoStageParams.localStock;
+      const fbaAvailable = currentStock + activeInTransitStock;
+      // FBA 端现货可撑天数 (到在途到货前)
+      const fbaDaysLeft = avgDailySales > 0 ? Math.floor(currentStock / avgDailySales) : 999;
+      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + localStock + effectiveInTransit) / avgDailySales).toFixed(1)) : 999;
 
       const fallbackResult = {
         avgDailySales,
@@ -303,31 +266,34 @@ export default function App() {
         reorderPoint,
         daysOfSupply,
         suggestedQuantity,
+        shipToFbaQty,
+        shipToFbaConstrained: twoStage.shipToFbaConstrained,
+        procureQty,
+        daysUntilFbaStockout: twoStage.daysUntilFbaStockout,
         targetCoverageDays: restockTargetDays,
         timelineSim,
         restockMode: activeMode,
         inTransitArriveDays,
-        explanation: `[AI 模块由于网络瞬时繁忙，系统已无缝启动本地一流水准的时间轴动态物理数学运算模型]
+        explanation: `[本地两段式库存模型测算结果 — AI 服务繁忙时自动启用，数学口径与列表完全一致]
 
-【科学库存与在途动态仿真报告 - 本地】
+【两段式补货诊断 · 本地】
 
-1. 【销量流速监测】：该 SKU 精算日均销量达 ${avgDailySales.toFixed(2)} 件/日。
-2. 【时间流耗察】：当前在库成品+可拆材料折合共 ${(currentStock + rawMaterialStock)} 件。由于已出发在途的 ${inTransitStock} 件预计需要 ${inTransitArriveDays} 天后才能抵达入仓。
-   ${isOutOfStockEver 
-     ? `🚨 【断货真空期红色警讯】：由于现有在库仅够维持 ${Math.floor((currentStock + rawMaterialStock) / (avgDailySales || 1))} 天，而在途大货要在 ${inTransitArriveDays} 天后才到，因此预计在 “未来第 ${outOfStockDayStart} 天至第 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）” 期间将出现严重的临时缺货断档断崖！这是传统的 ‘直接计入在途合并计算’ 根本无法发现的时间差盲点！`
-     : `🟢 【供应链在库无缝覆盖】：现有在库实物足以支撑 ${(currentStock + rawMaterialStock)} 天销售，能够安全顶到第 ${inTransitArriveDays} 天在途货物到仓上架，前置周期完全闭合，无任何断货风险！`
+1. 销量流速：该 SKU 日均销量约 ${avgDailySales.toFixed(2)} 件/天。
+2. FBA 端现状：FBA 可售 ${currentStock} 件，去 FBA 在途 ${activeInTransitStock} 件（预计第 ${inTransitArriveDays} 天到仓）。${
+   isOutOfStockEver
+     ? `\n   🚨 断货预警：FBA 现货仅够卖约 ${fbaDaysLeft} 天，逐日仿真显示在第 ${outOfStockDayStart} 天起会出现断货（共约 ${outOfStockDaysCount} 天），需尽快发货补充。`
+     : `\n   🟢 FBA 端在覆盖期内不会断货，节奏健康。`
    }
-3. 【最精准补货（备原料）计划】：
-   - 选择模式：智能防断货模型 (时间轴投影仿真)
-   - 为了确保在您期望的 ${restockTargetDays} 天良性周转覆盖期内，哪怕在途大货可能存在时间错开，也绝不掉入在库警戒线（保障最低库存不低于安全基数 ${safetyStock.toFixed(0)} 件），本批次最佳精密订货/备好原料建议量为：${suggestedQuantity} 件。
-4. 【订单与排产排程指导】：
-   - 采购加分装共需 ${leadTimeDays} 天。考虑到您的当前可用断库缓冲，建议最迟应在 ${Math.max(1, Math.floor(daysOfSupply - leadTimeDays))} 天内下单采购原材料并启动入库加工，以对冲头程和原料交期的耗时！`,
+3. 本期发往 FBA：建议从本地成品发 ${shipToFbaQty} 件去亚马逊${twoStage.shipToFbaConstrained ? `（注意：本地成品 ${localStock} 件不足以发满建议量，需先采购补充本地成品）` : ""}。
+4. 本期采购回仓：建议采购 ${procureQty} 件成品回本地仓库，按你设的常备 ${twoStageParams.localStockCycles} 个发货周期恢复水位。
+5. 下单时机：采购到可发货约需 ${twoStageParams.procurementLeadDays} 天，建议在本地成品见底前留足这段前置期下单。`,
         analyzedAt: new Date().toISOString()
       };
 
       const fallbackResultWithSnapshot = {
         ...fallbackResult,
         currentStock: skuWithParams.currentStock,
+        localStock: skuWithParams.localStock,
         rawMaterialStock: skuWithParams.rawMaterialStock,
         inTransitStock: skuWithParams.inTransitStock,
         inTransitBatches: skuWithParams.inTransitBatches
@@ -378,6 +344,12 @@ export default function App() {
     if (batchValues.inTransitStock !== "") {
       updates.inTransitStock = parseInt(batchValues.inTransitStock) || 0;
     }
+    if (batchValues.shipmentCycleDays !== "") {
+      updates.shipmentCycleDays = parseInt(batchValues.shipmentCycleDays) || 0;
+    }
+    if (batchValues.localStockCycles !== "") {
+      updates.localStockCycles = Math.max(1, parseInt(batchValues.localStockCycles) || 1);
+    }
 
     if (Object.keys(updates).length === 0) {
       showToast("⚠️ 请至少填写一个表单项后再进行批量应用！");
@@ -410,6 +382,8 @@ export default function App() {
       if (k === 'leadTimeDays') return '头程前置天数';
       if (k === 'safetyStockDays') return '安全缓冲天数';
       if (k === 'inTransitStock') return '在途库存数量';
+      if (k === 'shipmentCycleDays') return '发货周期天数';
+      if (k === 'localStockCycles') return '本地常备周期数';
       return k;
     }).join('、')}`);
 
@@ -419,7 +393,9 @@ export default function App() {
       inTransitArriveDays: "",
       leadTimeDays: "",
       safetyStockDays: "",
-      inTransitStock: ""
+      inTransitStock: "",
+      shipmentCycleDays: "",
+      localStockCycles: ""
     });
   };
 

@@ -388,12 +388,15 @@ async function startServer() {
       const history = skuPerformance.history || [];
       const currentStock = skuPerformance.currentStock !== undefined ? skuPerformance.currentStock : 0;
       const rawMaterialStock = skuPerformance.rawMaterialStock !== undefined ? skuPerformance.rawMaterialStock : 0;
+      const localStock = skuPerformance.localStock !== undefined ? skuPerformance.localStock : rawMaterialStock; // 迁移: 旧 rawMaterialStock -> 本地成品
       const inTransitStock = skuPerformance.inTransitStock !== undefined ? skuPerformance.inTransitStock : 0;
       const inTransitArriveDays = skuPerformance.inTransitArriveDays !== undefined ? Number(skuPerformance.inTransitArriveDays) : 15;
       const inTransitBatches = skuPerformance.inTransitBatches || [];
       const leadTimeDays = skuPerformance.leadTimeDays !== undefined ? skuPerformance.leadTimeDays : 30;
+      const procurementLeadDays = skuPerformance.procurementLeadDays !== undefined ? skuPerformance.procurementLeadDays : leadTimeDays;
       const safetyStockDays = skuPerformance.safetyStockDays !== undefined ? skuPerformance.safetyStockDays : 15;
       const shipmentCycleDays = skuPerformance.shipmentCycleDays !== undefined ? skuPerformance.shipmentCycleDays : 30;
+      const localStockCycles = skuPerformance.localStockCycles !== undefined ? skuPerformance.localStockCycles : 1;
 
       // Calculate total in-transit quantity
       const hasBatches = inTransitBatches && inTransitBatches.length > 0;
@@ -417,88 +420,64 @@ async function startServer() {
       const targetCoverageDays = passedCoverageDays || (leadTimeDays + shipmentCycleDays + safetyStockDays);
       const leadTimeDemand = Number((avgDailySales * leadTimeDays).toFixed(2));
       const safetyStock = Number((avgDailySales * safetyStockDays).toFixed(2));
-      const shipmentCycleDemand = Number((avgDailySales * shipmentCycleDays).toFixed(2));
       const reorderPoint = Number((leadTimeDemand + safetyStock).toFixed(2));
 
-      // ====== 科学库存推演模拟算法 ======
-      const timelineSim = [];
-      let currentSim = currentStock + rawMaterialStock;
-      let unflooredSim = currentStock + rawMaterialStock;
-      let minInventory = unflooredSim; // 最低在库结存极值 (基于理论供需计算用来推荐备货量)
-      let outOfStockDayStart = -1;   // 开始断货天
-      let outOfStockDayEnd = -1;     // 结束断货天
+      // ====== 两段式库存推演 (FBA 端物理库存仿真) ======
+      // 关键修复: 物理库存一旦归零就停在零, 断货流失不结转为负债, 否则后续到货会被虚假欠账抵消。
+      const timelineSim: any[] = [];
+      let physical = currentStock; // 仅 FBA 可售 (本地成品不直接卖, 需先发往 FBA)
+      let outOfStockDayStart = -1;
+      let outOfStockDayEnd = -1;
       let isOutOfStockEver = false;
-      let outOfStockDaysCount = 0;   // 累计断货天数
+      let outOfStockDaysCount = 0;
+      let daysUntilFbaStockout = -1;
 
-      // 模拟未来 Math.max(90, targetCoverageDays) 天
       const simDaysLimit = Math.max(90, targetCoverageDays);
       for (let d = 0; d <= simDaysLimit; d++) {
         if (d > 0) {
-          currentSim -= avgDailySales;
-          unflooredSim -= avgDailySales;
-          
-          // Apply shipments arriving on day d
+          if (physical < 0) physical = 0; // 先封底昨日结转
+          physical -= avgDailySales;       // 扣当日销量
           if (hasBatches) {
             inTransitBatches.forEach((b: any) => {
-              if (Number(b.arriveDays) === d) {
-                currentSim += Number(b.quantity) || 0;
-                unflooredSim += Number(b.quantity) || 0;
-              }
+              if (Number(b.arriveDays) === d) physical += Number(b.quantity) || 0;
             });
-          } else {
-            if (inTransitArriveDays === d) {
-              currentSim += inTransitStock;
-              unflooredSim += inTransitStock;
-            }
+          } else if (inTransitArriveDays === d) {
+            physical += inTransitStock;
           }
-
-          // Track shortage in targetCoverageDays
-          if (unflooredSim < minInventory && d <= targetCoverageDays) {
-            minInventory = unflooredSim;
-          }
-
-          const currentPhysical = Math.max(0, currentSim);
-          if (currentPhysical <= 0) {
-            if (!isOutOfStockEver) {
-              isOutOfStockEver = true;
-              outOfStockDayStart = d;
-            }
-            outOfStockDayEnd = d;
-            outOfStockDaysCount++;
-          }
-
-          timelineSim.push({
-            day: d,
-            stock: currentPhysical,
-            unfloored: unflooredSim,
-          });
-        } else {
-          timelineSim.push({
-            day: 0,
-            stock: Math.max(0, currentSim),
-            unfloored: unflooredSim,
-          });
         }
+        const currentPhysical = Math.max(0, physical);
+        if (d > 0 && currentPhysical <= 0) {
+          if (!isOutOfStockEver) { isOutOfStockEver = true; outOfStockDayStart = d; daysUntilFbaStockout = d; }
+          outOfStockDayEnd = d;
+          outOfStockDaysCount++;
+        }
+        timelineSim.push({ day: d, stock: Math.round(currentPhysical), safetyLine: Math.round(safetyStock) });
       }
 
-      const maxShortageGap = minInventory < 0 ? Math.abs(minInventory) : 0;
       const physicalMinInventory = Math.min(...timelineSim.map(t => t.stock));
-      
-      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + rawMaterialStock) / avgDailySales).toFixed(1)) : 0;
-      
+
+      const daysOfSupply = avgDailySales > 0 ? Number(((currentStock + localStock + activeInTransitStock) / avgDailySales).toFixed(1)) : 0;
+
       const batchesDescription = hasBatches
         ? inTransitBatches.map((b: any) => `${b.remark || '在途货件'}: ${b.quantity}件 (预计第 ${b.arriveDays} 天到仓)`).join(", ")
         : `单个在途批次: ${inTransitStock}件, 预计第 ${inTransitArriveDays} 天到仓`;
 
-      // Suggested quantity calculation based on restockMode
-      let suggestedQuantity = 0;
-      if (restockMode === "simulated") {
-        suggestedQuantity = Math.max(0, Math.round(safetyStock - minInventory));
-      } else if (restockMode === "exclude") {
-        suggestedQuantity = Math.max(0, Math.round(leadTimeDemand + shipmentCycleDemand + safetyStock - (currentStock + rawMaterialStock)));
-      } else {
-        suggestedQuantity = Math.max(0, Math.round(leadTimeDemand + shipmentCycleDemand + safetyStock - (currentStock + rawMaterialStock + activeInTransitStock)));
-      }
+      // ===== 两个核心补货决策 (与列表/本地模型同源口径) =====
+      // 决策1: 本期发往 FBA = 让 FBA 撑过(发货周期+到仓天数+安全缓冲), 受本地成品约束
+      const fbaCoverDays = shipmentCycleDays + inTransitArriveDays + safetyStockDays;
+      const fbaTargetUnits = avgDailySales * fbaCoverDays;
+      const fbaAvailable = currentStock + activeInTransitStock;
+      const fbaNeed = Math.max(0, Math.ceil(fbaTargetUnits - fbaAvailable));
+      const shipToFbaQty = Math.min(fbaNeed, Math.max(0, Math.floor(localStock)));
+      const shipToFbaConstrained = fbaNeed > localStock;
+
+      // 决策2: 本期采购回仓 = 按常备周期数恢复本地水位 + 覆盖采购前置期
+      const localAfterShip = localStock - shipToFbaQty;
+      const localTargetUnits = avgDailySales * (localStockCycles * shipmentCycleDays + procurementLeadDays);
+      const procureQty = Math.max(0, Math.ceil(localTargetUnits - localAfterShip));
+
+      // suggestedQuantity 对外保持兼容: 以采购回仓量为准
+      const suggestedQuantity = procureQty;
 
       const prompt = `
         您是资深亚马逊供应链规划师与物流采购专家。请根据以下提供的 SKU 历史销售数据与当前库存参数，给出极其专业、逻辑严密、多维度的备货与原材料采购分析建议。
@@ -506,28 +485,24 @@ async function startServer() {
         【重要特性：动态库存时间轴模拟 (Dynamic Timeline Simulation)】
         - 模拟模式：${restockMode === "simulated" ? "科学时间轴投影仿真模式 (Simulated Dynamic Projection)" : restockMode === "exclude" ? "保守排除在途模式 (Exclude In-transit)" : "常规计入在途模式 (Include In-transit)"}
         - 现有成品在库: ${currentStock} 件，现有可折成品的在库材料: ${rawMaterialStock} 件。
-        - 已经出发并在途的物流总库存: ${activeInTransitStock} 件。
+        - 已经出发并在途的物流总库存(去 FBA 在途): ${activeInTransitStock} 件。
         - 已经在途的多分批到仓详情：
           - ${batchesDescription}
+        - 本地仓库成品库存: ${localStock} 件。
         - 日销售均速 (Average Daily Sales): ${avgDailySales.toFixed(2)} 件/日
-        - 采购加工及头程到仓总周期 (Lead Time - LT): ${leadTimeDays} 天。即如果今天启动下单，新货物最快需要 ${leadTimeDays} 天才能变成 FBA 可售库存。
-        - 目标总安全备足天数: ${targetCoverageDays} 天（希望保障未来 ${targetCoverageDays} 天周转无忧）
-        - 在无新采购情况下，系统模拟未来 90 天以上的结存流向结果：
-          * 实际物理在库最低降至：${physicalMinInventory.toFixed(1)} 件 
-          * 是否会发生缺货/断货：${isOutOfStockEver ? `是。在未来第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）将面临库存见底，产生临时中断亏空。` : "否。系统仿真无断货断供风险。"}
-          * 在此期间最低结存（包含在途/可折材料在目标覆盖天数内的最低值）：${minInventory.toFixed(1)} 件 
+        - 采购到可发货前置天数: ${procurementLeadDays} 天; 去 FBA 在途到仓天数: ${inTransitArriveDays} 天; 发货周期: ${shipmentCycleDays} 天; 本地常备周期数: ${localStockCycles}。
+        - FBA 端逐日仿真(无新发货)结果：
+          * FBA 物理库存最低降至：${physicalMinInventory.toFixed(0)} 件 
+          * 是否会断货：${isOutOfStockEver ? `是。预计第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）FBA 端会卖空。` : "否。覆盖期内 FBA 端不会断货。"}
+        - 两段式补货决策(系统已按统一口径算出，供你解读，不要改数字)：
+          * 本期发往 FBA：${shipToFbaQty} 件${shipToFbaConstrained ? `（本地成品 ${localStock} 件不足以发满需求，需先采购）` : ""}
+          * 本期采购回仓：${procureQty} 件
 
-        请撰写一篇极其详尽、高参考价值的供应链报告作为 json 的 "explanation" 字段返回。请从以下四个方面深度剖析：
-        1. **【在库现货与在途时空对齐诊断】(Inventory & In-transit Temporal Alignment Diagnosis)**
-           - 点评当前在库现货 + 原材料库存（共 ${currentStock + rawMaterialStock} 件）能支撑多少天的周转，以及是否健康。点评当前已经配置的头程在途货量 ${activeInTransitStock} 的分布和时间差配合。
-        2. **【物理结存与供需缺口精确评估】(Physical Balance & Deficit Assessment)**
-           - 详细剖析在没有新采购动作的情况下，未来时间轴上何时会跌破安全水位（SS: ${safetyStock}件）和何时发生彻底断货，定量分析断供期和最高断货漏洞（${maxShortageGap.toFixed(0)} 件）。在临时断货时，给卖家具体的提速或加急发快递合并解决脱销的对策。
-        3. **【动态时间轴智能备货模型推演】(Dynamic Restocking Model Reasoning)**
-           - 阐述当前激活的 【${restockMode === "simulated" ? "时间轴投影仿真" : restockMode === "exclude" ? "排除在途" : "常规计入在途模式"}】 备货量计算的优越性，以及为何得出订货/原材料备货数 ${suggestedQuantity} 件之科学价值，对齐时间差以防漏补、重补或高危断存。
-        4. **【加急干预对策与滚动下单排程与分装执行】(Expedited Mitigation & Rolling Purchase Schedule)**
-           - 针对未来 ${isOutOfStockEver ? `第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）的物理断档断供期` : "整个周转覆盖周期"} 的物理供求真空期，给出具体的应急特快物流加急或工厂赶单对策。输出精确的备货与打包启动天数：卖家必须在未来的 **${Math.max(1, Math.floor(daysOfSupply - leadTimeDays))} 天内** 立即要求工厂打包、贴标或启动分装，否则由于总提前期 (Lead Time) 需要 ${leadTimeDays} 天，将面临灾难性断货与产品页面链接曝光权重暴跌。
-        5. **【供应链绩效与资金流平衡优化建议】(Supply Chain KPI & Cashflow Optimization)**
-           - 对该 SKU 的存货周转率 (Inventory Turnover Ratio)、持有成本 (Holding Cost)、断货机会成本 (Out-of-Stock Opportunity Cost) 进行财务与运营上的多维权衡博弈分析。
+        请撰写一篇详尽实用的供应链报告作为 json 的 "explanation" 字段返回。请从以下方面剖析：
+        1. **【FBA 端断货风险诊断】** 点评 FBA 可售 ${currentStock} 件 + 去 FBA 在途 ${activeInTransitStock} 件能撑多少天，结合到仓时点判断是否会出现断货真空期。
+        2. **【本期发往 FBA 解读】** 解释为何建议发 ${shipToFbaQty} 件去 FBA（让 FBA 撑过发货周期+到仓+安全缓冲）。${shipToFbaConstrained ? "重点提示本地成品不足、需优先采购补充本地。" : ""}
+        3. **【本期采购回仓解读】** 解释为何建议采购 ${procureQty} 件回本地仓库（按常备 ${localStockCycles} 个发货周期恢复水位 + 覆盖采购前置期）。
+        4. **【下单排程与资金流平衡】** 采购到可发货需 ${procurementLeadDays} 天，给出最迟下单时点；并就资金占用与断货风险做简要权衡（常备周期越高资金压力越大）。
             
         务必严格以以下 JSON 形式返回结果，无需任何 code markdown 包装，JSON 格式如下：
         {
@@ -537,6 +512,8 @@ async function startServer() {
           "reorderPoint": 0,
           "daysOfSupply": 0,
           "suggestedQuantity": 0,
+          "shipToFbaQty": 0,
+          "procureQty": 0,
           "targetCoverageDays": 0,
           "explanation": "您的详细供应链分析、多波段在途到达点评、诊断结论、交货时间差警示、以及未来的下单与加工排程建议。"
         }
@@ -555,6 +532,10 @@ async function startServer() {
         parsed.reorderPoint = reorderPoint;
         parsed.daysOfSupply = daysOfSupply;
         parsed.suggestedQuantity = suggestedQuantity;
+        parsed.shipToFbaQty = shipToFbaQty;
+        parsed.shipToFbaConstrained = shipToFbaConstrained;
+        parsed.procureQty = procureQty;
+        parsed.daysUntilFbaStockout = daysUntilFbaStockout;
         parsed.targetCoverageDays = targetCoverageDays;
 
         parsed.analyzedAt = new Date().toISOString();
@@ -579,12 +560,16 @@ async function startServer() {
           reorderPoint,
           daysOfSupply,
           suggestedQuantity,
+          shipToFbaQty,
+          shipToFbaConstrained,
+          procureQty,
+          daysUntilFbaStockout,
           targetCoverageDays,
           timelineSim,
           restockMode,
           inTransitArriveDays,
           inTransitBatches,
-          explanation: `【⚠️ 提示：AI 详细服务在线解析超时，系统已自动触发高阶时间轴模拟器进行离线推算，分析结论如下】\n\n1. **动态销售评估**：根据历史销售记录，当前预测日销售均速为 **${avgDailySales.toFixed(2)}件/日**。安全库存警戒线（SS）设在 **${safetyStock}件** 对应的安全在库水平。\n\n2. **多批次在途仿真推演**：${fallbackInTransitDescription} 仿真曲线表明，结合您当前的成品及原材料在库总量，在接下来的 ${simDaysLimit} 天中：\n   * ${isOutOfStockEver ? `🚨 **异常断货预警**：系统研判可用库存无法形成闭环覆盖！在**未来第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）**将面临库存见底，产生临时中断亏空。` : "✅ **安全绿灯**：科学推演表明，成品及多波段到货可无断档平稳过渡，未出现断货亏空状态。"}\n   * 在此期间，预估最低可用在库结存（包含可拆材料）极低谷值跌至 **${Math.round(minInventory)}件**。\n\n3. **精准MRP备货排程建议**：\n   * 为使此目标覆盖期（${targetCoverageDays}天）内的在库最低结存维持在安全警戒线（SS: ${safetyStock}件）的水准上，本次最科学的成品打包下单量应为：**${suggestedQuantity} 件**。\n   * ${suggestedQuantity > 0 ? `该批备货下单后，请务必保证从采购、打包到出库的总周转时间（Lead Time）在 **${leadTimeDays} 天**之内，这批多出的货件方能在时间轴真空期产生对齐保护，帮助您的整个物流网络恢复健康的良性防断货周转曲线！` : "当前在途和在库非常安全充足，在当前流速下暂时无需额外打包和发起补货采购。请维持日常巡查。"}`
+          explanation: `【AI 详细解析超时，已用本地两段式模型离线推算，数学口径与列表一致】\\n\\n1. 销量流速：日均约 ${avgDailySales.toFixed(2)} 件/天。\\n\\n2. FBA 端仿真：${fallbackInTransitDescription} ${isOutOfStockEver ? `🚨 预计第 ${outOfStockDayStart} 到 ${outOfStockDayEnd} 天（共 ${outOfStockDaysCount} 天）FBA 端会卖空，需尽快发货。` : "✅ 覆盖期内 FBA 端不会断货。"}\\n\\n3. 本期发往 FBA：建议发 **${shipToFbaQty} 件** 去亚马逊${shipToFbaConstrained ? `（本地成品 ${localStock} 件不足以发满，需先采购）` : ""}。\\n\\n4. 本期采购回仓：建议采购 **${procureQty} 件** 回本地仓库，按常备 ${localStockCycles} 个发货周期恢复水位。\\n\\n5. 下单时机：采购到可发货约 ${procurementLeadDays} 天，请在本地成品见底前留足前置期下单。`
         };
         return res.json(fallbackResult);
       }
