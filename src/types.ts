@@ -1,3 +1,5 @@
+export type AIProvider = 'deepseek' | 'claude' | 'gemini' | 'openai' | 'custom';
+
 export interface Store {
   id: string;
   name: string;
