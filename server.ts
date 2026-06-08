@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import { GoogleGenAI } from "@google/genai";
-import { readDb, writeDb } from "./server/db";
+import { readDb, writeDb, getAIConfig, saveAIConfig, AIConfig, ProviderSettings } from "./server/db";
 import fs from "fs";
 
 dotenv.config();
@@ -23,93 +23,311 @@ if (process.env.PROXY_URL) {
   }
 }
 
-async function generateAIChatCompletion(systemInstruction: string, prompt: string) {
-  const deepseekKey = process.env.DEEPSEEK_API_KEY;
-  if (deepseekKey) {
-    try {
-      const apiBase = process.env.DEEPSEEK_API_BASE || "https://api.deepseek.com/v1";
-      const apiModel = process.env.DEEPSEEK_API_MODEL || "deepseek-chat";
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
-      
-      const response = await fetch(`${apiBase}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${deepseekKey}`
-        },
-        body: JSON.stringify({
-          model: apiModel,
-          messages: [
-            { role: "system", content: systemInstruction },
-            { role: "user", content: prompt }
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0.3
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+// ── In-memory AI config cache ────────────────────────────────────────────
+let cachedAIConfig: AIConfig | null = null;
 
-      if (response.ok) {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content;
-        if (content) {
-          return { content, provider: "DeepSeek" };
-        }
-      } else {
-        const errText = await response.text();
-        console.warn(`DeepSeek API failed with status ${response.status}: ${errText}. Falling back to Gemini...`);
-      }
-    } catch (err) {
-      console.warn("DeepSeek API call error, falling back to Gemini:", err);
-    }
+async function loadAIConfigCache() {
+  try {
+    cachedAIConfig = await getAIConfig();
+  } catch (e) {
+    console.warn("[AI Config] Failed to load from DB, using env vars:", e);
   }
+}
 
-  // Use Gemini as the default & fallback
-  const geminiKey = process.env.GEMINI_API_KEY;
-  if (!geminiKey) {
-    throw new Error("请在 Settings > Secrets 或 .env 中配置 GEMINI_API_KEY 以驱动 AI 分析 (DeepSeek Key 有缺)");
-  }
+// ── Provider implementations ─────────────────────────────────────────────
 
-  const ai = new GoogleGenAI({
-    apiKey: geminiKey,
-    httpOptions: {
+async function callOpenAICompatible(
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+  systemInstruction: string,
+  prompt: string,
+  providerName: string
+): Promise<string> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
       headers: {
-        'User-Agent': 'aistudio-build',
-      }
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: prompt }
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.3
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`${providerName} API ${response.status}: ${errText}`);
     }
-  });
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error(`${providerName} 返回空内容`);
+    return content;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
+async function callClaudeAPI(
+  apiKey: string,
+  model: string,
+  systemInstruction: string,
+  prompt: string
+): Promise<string> {
+  const TIMEOUT_MS = 60000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        system: systemInstruction,
+        messages: [{ role: "user", content: prompt }]
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Claude API ${response.status}: ${errText}`);
+    }
+    const data = await response.json();
+    const content = data.content?.[0]?.text;
+    if (!content) throw new Error("Claude 返回空内容");
+    return content;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+      throw new Error(`Claude API 请求超时（>${TIMEOUT_MS / 1000}秒）。请检查：① 代理是否能访问 api.anthropic.com ② .env 里的 PROXY_URL 与 TUN 模式是否冲突（开了 TUN 可将 PROXY_URL 注释掉）`);
+    }
+    throw err;
+  }
+}
+
+async function callGeminiAPI(
+  apiKey: string,
+  model: string,
+  systemInstruction: string,
+  prompt: string
+): Promise<string> {
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+  });
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("Gemini API 响应超时（30秒）")), 30000)
+  );
   const geminiCall = ai.models.generateContent({
-    model: "gemini-3.5-flash",
+    model: model || "gemini-2.0-flash",
     contents: prompt,
     config: {
-      systemInstruction: systemInstruction,
+      systemInstruction,
       responseMimeType: "application/json",
       temperature: 0.3
     }
   });
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error("Gemini API 响应超时（15秒）")), 15000);
-  });
-
   const response = await Promise.race([geminiCall, timeoutPromise]);
-
   const content = response.text;
-  if (!content) {
-    throw new Error("Gemini API 返回了空内容。");
+  if (!content) throw new Error("Gemini 返回空内容");
+  return content;
+}
+
+function extractJSON(raw: string): string {
+  let s = raw.trim();
+
+  // Strip ```json ... ``` or ``` ... ``` fences
+  const fenced = s.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/);
+  if (fenced) s = fenced[1].trim();
+
+  // Try direct parse first
+  try { JSON.parse(s); return s; } catch {}
+
+  // Extract the outermost { ... } block
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    const candidate = s.slice(start, end + 1);
+    try { JSON.parse(candidate); return candidate; } catch {}
   }
-  return { content, provider: "Gemini" };
+
+  return s;
+}
+
+async function callProvider(providerName: string, settings: ProviderSettings, systemInstruction: string, prompt: string): Promise<{ content: string; provider: string }> {
+  let content: string;
+  let label: string;
+  switch (providerName) {
+    case 'claude': {
+      const model = settings.model || "claude-sonnet-4-6";
+      content = await callClaudeAPI(settings.apiKey, model, systemInstruction, prompt);
+      label = `Claude (${model})`;
+      break;
+    }
+    case 'openai': {
+      const baseUrl = settings.baseUrl || "https://api.openai.com/v1";
+      const model = settings.model || "gpt-4o-mini";
+      content = await callOpenAICompatible(settings.apiKey, baseUrl, model, systemInstruction, prompt, "OpenAI");
+      label = `OpenAI (${model})`;
+      break;
+    }
+    case 'deepseek': {
+      const baseUrl = settings.baseUrl || "https://api.deepseek.com/v1";
+      const model = settings.model || "deepseek-chat";
+      content = await callOpenAICompatible(settings.apiKey, baseUrl, model, systemInstruction, prompt, "DeepSeek");
+      label = `DeepSeek (${model})`;
+      break;
+    }
+    case 'gemini': {
+      const model = settings.model || "gemini-2.0-flash";
+      content = await callGeminiAPI(settings.apiKey, model, systemInstruction, prompt);
+      label = `Gemini (${model})`;
+      break;
+    }
+    default: {
+      // custom or unknown — treat as OpenAI-compatible
+      const baseUrl = settings.baseUrl || "https://api.openai.com/v1";
+      const model = settings.model || "gpt-4o-mini";
+      content = await callOpenAICompatible(settings.apiKey, baseUrl, model, systemInstruction, prompt, providerName);
+      label = `${providerName} (${model})`;
+      break;
+    }
+  }
+  return { content, provider: label };
+}
+
+async function generateAIChatCompletion(systemInstruction: string, prompt: string) {
+  // 1. Use DB-configured active provider
+  const cfg = cachedAIConfig;
+  if (cfg?.activeProvider && cfg.providers?.[cfg.activeProvider]?.apiKey) {
+    const settings = cfg.providers[cfg.activeProvider];
+    try {
+      return await callProvider(cfg.activeProvider, settings, systemInstruction, prompt);
+    } catch (err) {
+      console.warn(`[AI] Active provider (${cfg.activeProvider}) failed:`, err instanceof Error ? err.message : err);
+      throw err; // don't silently fall back — surface the real error to the user
+    }
+  }
+
+  // 2. Fall back to env var DeepSeek
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  if (deepseekKey) {
+    try {
+      const baseUrl = process.env.DEEPSEEK_API_BASE || "https://api.deepseek.com/v1";
+      const model = process.env.DEEPSEEK_API_MODEL || "deepseek-chat";
+      const content = await callOpenAICompatible(deepseekKey, baseUrl, model, systemInstruction, prompt, "DeepSeek");
+      return { content, provider: "DeepSeek (.env)" };
+    } catch (err) {
+      console.warn("DeepSeek .env key failed, falling back to Gemini:", err);
+    }
+  }
+
+  // 3. Fall back to env var Gemini
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) {
+    throw new Error("未配置任何 AI Provider。请在前台「AI 模型配置」中填写 API Key，或在 .env 中配置 DEEPSEEK_API_KEY / GEMINI_API_KEY。");
+  }
+  const content = await callGeminiAPI(geminiKey, "gemini-2.0-flash", systemInstruction, prompt);
+  return { content, provider: "Gemini (.env)" };
 }
 
 async function startServer() {
+  // Load AI config into memory cache at startup
+  await loadAIConfigCache();
+
   const app = express();
   const PORT = 3000;
 
   app.use(express.json({ limit: '10mb' }));
+
+  // --- AI CONFIG ENDPOINTS ---
+
+  const maskKey = (key: string) =>
+    key.length > 4 ? "••••••••" + key.slice(-4) : "••••";
+
+  app.get("/api/ai-config", async (req, res) => {
+    try {
+      const cfg = cachedAIConfig || { activeProvider: undefined, providers: {} };
+      const maskedProviders: Record<string, any> = {};
+      for (const [name, s] of Object.entries(cfg.providers || {})) {
+        maskedProviders[name] = {
+          model: s.model || "",
+          baseUrl: s.baseUrl || "",
+          apiKeyMasked: maskKey(s.apiKey)
+        };
+      }
+      res.json({ activeProvider: cfg.activeProvider || null, providers: maskedProviders, updatedAt: cfg.updatedAt || "" });
+    } catch (error: any) {
+      res.status(500).json({ error: "读取 AI 配置失败", message: error.message });
+    }
+  });
+
+  // Save/update a single provider's settings
+  app.post("/api/ai-config/provider", async (req, res) => {
+    try {
+      const { provider, apiKey, model, baseUrl } = req.body;
+      if (!provider || !apiKey) return res.status(400).json({ error: "缺少 provider 或 apiKey" });
+      const cfg: AIConfig = cachedAIConfig || { providers: {} };
+      cfg.providers = cfg.providers || {};
+      cfg.providers[provider] = { apiKey, model: model || undefined, baseUrl: baseUrl || undefined };
+      if (!cfg.activeProvider) cfg.activeProvider = provider; // auto-activate first saved provider
+      await saveAIConfig(cfg);
+      cachedAIConfig = cfg;
+      console.log(`[AI Config] Saved provider=${provider}, active=${cfg.activeProvider}`);
+      res.json({ success: true, activeProvider: cfg.activeProvider });
+    } catch (error: any) {
+      console.error("[AI Config] Save failed:", error);
+      res.status(500).json({ error: "保存失败", message: error.message });
+    }
+  });
+
+  // Switch active provider
+  app.post("/api/ai-config/active", async (req, res) => {
+    try {
+      const { provider } = req.body;
+      const cfg: AIConfig = cachedAIConfig || { providers: {} };
+      if (!cfg.providers?.[provider]) return res.status(400).json({ error: "该 Provider 未配置" });
+      cfg.activeProvider = provider;
+      await saveAIConfig(cfg);
+      cachedAIConfig = cfg;
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: "切换失败", message: error.message });
+    }
+  });
+
+  // Delete a provider's config
+  app.delete("/api/ai-config/provider/:name", async (req, res) => {
+    try {
+      const name = req.params.name;
+      const cfg: AIConfig = cachedAIConfig || { providers: {} };
+      delete cfg.providers[name];
+      if (cfg.activeProvider === name) {
+        cfg.activeProvider = Object.keys(cfg.providers)[0] || undefined;
+      }
+      await saveAIConfig(cfg);
+      cachedAIConfig = cfg;
+      res.json({ success: true, activeProvider: cfg.activeProvider || null });
+    } catch (error: any) {
+      res.status(500).json({ error: "删除失败", message: error.message });
+    }
+  });
 
   // --- DATABASE ENDPOINTS ---
 
@@ -322,23 +540,35 @@ async function startServer() {
       attribution: skuData.attribution
     };
 
+    const recentActions: any[] = skuData.recentActions || [];
+    const actionsSection = recentActions.length > 0
+      ? `
+      【近4周运营行动记录】
+      以下是运营团队在近4周内执行的运营行动，请结合这些行动分析其对流量、转化率和销售额的实际影响：
+      ${recentActions.map((a: any) =>
+        `- [${a.type}] ${a.date}：${a.title}${a.details ? `（${a.details}）` : ''}`
+      ).join('\n      ')}
+      `
+      : '';
+
     const prompt = `
       你是一位资深的亚马逊运营专家。请分析以下提供的 SKU 财务和流量数据。
-      
+
       【特别提醒 方案一 历史数据多维压缩技术生效中】
       - "recentWeeks5" 代表最新的第 1 至 5 周的高解析核心详情数据（包含日常转化、会话 and 销量），您需以此重点辨析最新的趋势变动。
       - "historicalBaselineCompared" 代表 5 周之前的历史记录的周度聚合均值，提供了长期基础业绩水位线背景，可作为对比长期变动的底色基准。
-      
+
       待分析数据:
       ${JSON.stringify(compactedSkuData, null, 2)}
-      
+      ${actionsSection}
       分析重点:
-      1. 波动与多维归因 (重要): 如果是在数据中发现明显的趋势，请进行分析。
-      
+      1. 波动与多维归因 (重要): 如果在数据中发现明显趋势，请进行分析。
+      2. 运营行动关联 (重要): 如有近期运营行动记录，请判断各行动是否与数据波动存在因果关联，并在 diagnosis 中点评行动效果。
+
       输出格式:
       {
         "summary": "一句话概括本期业绩现状及主导因素。",
-        "diagnosis": "详细的核心漏斗指标波动诊断，科学引用归因分解结果并推断底层根因。请根据逻辑使用换行符 '\\n' 分割多段或分点描述，不要堆砌成一个不换行的大长段。",
+        "diagnosis": "详细的核心漏斗指标波动诊断，科学引用归因分解结果并推断底层根因。如有运营行动，请评估其实际效果。请根据逻辑使用换行符 '\\n' 分割多段或分点描述，不要堆砌成一个不换行的大长段。",
         "pros": ["做得好的地方或利好因子"],
         "cons": ["面临的风险、流量漏洞或转化瓶颈"],
         "recommendations": ["具体的下一步运营行动建议（如广告调优、提价/折让、Listing精修、高时效干线补货等）"]
@@ -347,11 +577,11 @@ async function startServer() {
 
     try {
       const { content, provider } = await generateAIChatCompletion(
-        "You are a professional Amazon merchant advisor. You must output the analysis strictly in valid JSON format matching the requested schema.",
+        "You are a professional Amazon merchant advisor. Output ONLY a raw JSON object — no markdown, no code fences, no explanation outside the JSON. All string values must be valid JSON strings: escape double quotes as \\\" and use \\n for newlines.",
         prompt
       );
 
-      const parsed = JSON.parse(content);
+      const parsed = JSON.parse(extractJSON(content));
       parsed.provider = provider;
       parsed.tokenSavingsPct = tokenSavingsPct;
       parsed.compressedWeeksCount = compressedHistory ? compressedHistory.compressedWeeksCount : 0;
@@ -504,7 +734,7 @@ async function startServer() {
         3. **【本期采购回仓解读】** 解释为何建议采购 ${procureQty} 件回本地仓库（按常备 ${localStockCycles} 个发货周期恢复水位 + 覆盖采购前置期）。
         4. **【下单排程与资金流平衡】** 采购到可发货需 ${procurementLeadDays} 天，给出最迟下单时点；并就资金占用与断货风险做简要权衡（常备周期越高资金压力越大）。
             
-        务必严格以以下 JSON 形式返回结果，无需任何 code markdown 包装，JSON 格式如下：
+        务必严格以以下 JSON 形式返回结果，无需任何 code markdown 包装。explanation 字段必须是合法 JSON 字符串：不得包含未转义的双引号，换行用 \\n 表示，不得使用 markdown 格式。JSON 格式如下：
         {
           "avgDailySales": 0,
           "leadTimeDemand": 0,
@@ -521,11 +751,11 @@ async function startServer() {
 
       try {
         const { content, provider } = await generateAIChatCompletion(
-          "You are a professional Amazon merchant advisor. You must output the analysis strictly in valid JSON format matching the requested schema.",
+          "You are a professional Amazon merchant advisor. Output ONLY a raw JSON object — no markdown, no code fences, no explanation outside the JSON. All string values must be valid JSON strings: escape double quotes as \\\" and use \\n for newlines.",
           prompt
         );
 
-        const parsed = JSON.parse(content);
+        const parsed = JSON.parse(extractJSON(content));
         parsed.avgDailySales = avgDailySales;
         parsed.leadTimeDemand = leadTimeDemand;
         parsed.safetyStock = safetyStock;

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   Upload, Download, Package,
-  BarChart3, RefreshCw, CheckCircle2, XCircle, AlertTriangle
+  BarChart3, RefreshCw, CheckCircle2, XCircle, AlertTriangle, Bot
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { WeeklyData, InventoryData, SKUPerformance, AIInsight, Store, OperationAction, SKUAnomaly } from "./types";
@@ -13,6 +13,7 @@ import { InfoTooltip } from "./components/common/InfoTooltip";
 import { InventoryView } from "./components/inventory/InventoryView";
 import { DashboardView } from "./components/dashboard/DashboardView";
 import { UploadView } from "./components/upload/UploadView";
+import { AISettingsModal } from "./components/settings/AISettingsModal";
 
 export default function App() {
   const [stores, setStores] = useState<Store[]>([]);
@@ -117,6 +118,7 @@ export default function App() {
   const [actionStatus, setActionStatus] = useState<'planned' | 'executed' | 'completed'>('executed');
   const [isAddingAction, setIsAddingAction] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [showAISettings, setShowAISettings] = useState(false);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -1026,18 +1028,39 @@ export default function App() {
         sales: h.totalSales.toFixed(2)
       }));
 
-      // Calculate factors before calling AI
+      // Calculate funnel attribution
       const attributionResult = getFunnelAttribution(skuPerformance[sku], currentWeekDate);
+
+      // Collect last 4 weeks of operational actions
+      const ACTION_TYPE_LABELS: Record<string, string> = {
+        PRICING: '价格调整', ADVERTISING: '广告优化',
+        LISTING_OPTIMIZATION: 'Listing优化', REPLENISHMENT: '补货备货',
+        PROMOTION: '促销活动', OTHER: '其他'
+      };
+      const currentWeekTime = getSortableDateValue(currentWeekDate);
+      const fourWeeksMs = 4 * 7 * 24 * 60 * 60 * 1000;
+      const recentActions = (skuPerformance[sku].actions || [])
+        .filter(a => {
+          const t = getSortableDateValue(a.date);
+          return t <= currentWeekTime && t >= currentWeekTime - fourWeeksMs;
+        })
+        .map(a => ({
+          type: ACTION_TYPE_LABELS[a.type] || a.type,
+          date: a.date,
+          title: a.title,
+          details: a.details || ''
+        }));
 
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           skuData: {
             sku: skuPerformance[sku].sku,
             currentStock: skuPerformance[sku].currentStock,
             history,
-            attribution: attributionResult
+            attribution: attributionResult,
+            recentActions: recentActions.length > 0 ? recentActions : undefined
           }
         }),
       });
@@ -1379,6 +1402,16 @@ export default function App() {
             <span className="font-medium text-sm">数据导入</span>
           </button>
         </nav>
+
+        <div className="px-4 pb-2">
+          <button
+            onClick={() => setShowAISettings(true)}
+            className="w-full px-4 py-3 rounded-lg flex items-center gap-3 transition-all duration-200 hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-left"
+          >
+            <Bot size={18} className="text-slate-500" />
+            <span className="font-medium text-sm">AI 模型配置</span>
+          </button>
+        </div>
 
         <div className="p-4 bg-slate-800/50 m-4 rounded-xl border border-slate-700/50 space-y-3">
           <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-1">数据安全</p>
@@ -1759,6 +1792,10 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {showAISettings && (
+        <AISettingsModal onClose={() => setShowAISettings(false)} />
+      )}
 
       <footer className="fixed bottom-0 right-0 p-4 text-[9px] uppercase font-mono opacity-20 tracking-widest select-none pointer-events-none">
         亚马逊运营分析师 // 终端 v1.1.2

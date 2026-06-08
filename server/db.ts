@@ -1,6 +1,8 @@
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -160,6 +162,45 @@ export async function saveSku(skuData: SKU): Promise<SKU> {
 
   await firestore.collection("skus").doc(docId).set(dataToSave, { merge: true });
   return dataToSave;
+}
+
+// ── AI 配置 ───────────────────────────────────────────────────────────────
+
+export interface ProviderSettings {
+  apiKey: string;
+  model?: string;
+  baseUrl?: string;
+}
+
+export interface AIConfig {
+  activeProvider?: string;
+  providers: Record<string, ProviderSettings>;
+  updatedAt?: string;
+}
+
+// AI config is stored in a local file (not Firestore) to avoid permission issues
+// and to keep API keys off the cloud database.
+function aiConfigPath(): string {
+  const dataDir = join(process.cwd(), "data");
+  if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+  return join(dataDir, "ai-config.json");
+}
+
+export async function getAIConfig(): Promise<AIConfig | null> {
+  try {
+    const p = aiConfigPath();
+    if (!existsSync(p)) return null;
+    const raw = readFileSync(p, "utf-8");
+    return JSON.parse(raw) as AIConfig;
+  } catch (e) {
+    console.error('[AI Config] Read failed:', e);
+    return null;
+  }
+}
+
+export async function saveAIConfig(config: AIConfig): Promise<void> {
+  const p = aiConfigPath();
+  writeFileSync(p, JSON.stringify({ ...config, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
 }
 
 export async function bulkSaveSkus(skus: SKU[]): Promise<number> {
