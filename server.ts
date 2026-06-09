@@ -175,9 +175,15 @@ function extractJSON(raw: string): string {
 }
 
 function repairJSON(s: string): string {
-  // Replace literal newlines/tabs inside JSON string values with escape sequences.
-  // We walk char by char tracking whether we're inside a string to avoid
-  // mangling structural characters.
+  // Walk char-by-char tracking string boundaries.
+  // Fixes two common AI JSON generation issues:
+  //   1. Literal newlines/tabs inside string values
+  //   2. Unescaped double-quotes inside string values
+  //
+  // For (2) we use a lookahead heuristic: when we see " inside a string,
+  // peek at the first non-whitespace char after it. If that char is a JSON
+  // structural separator (, } ]) we treat this " as the closing quote;
+  // otherwise we escape it as \".
   let out = '';
   let inString = false;
   let i = 0;
@@ -185,13 +191,23 @@ function repairJSON(s: string): string {
     const ch = s[i];
     if (inString) {
       if (ch === '\\') {
-        // Keep escape sequence intact
+        // Keep existing escape sequence intact
         out += ch + (s[i + 1] ?? '');
         i += 2;
         continue;
       } else if (ch === '"') {
-        inString = false;
-        out += ch;
+        // Lookahead: skip whitespace and check what follows
+        let j = i + 1;
+        while (j < s.length && /[\s]/.test(s[j])) j++;
+        const next = s[j] ?? '';
+        if (next === '' || next === ',' || next === '}' || next === ']' || next === ':') {
+          // Looks like a proper closing quote
+          inString = false;
+          out += ch;
+        } else {
+          // Unescaped inner quote — escape it
+          out += '\\"';
+        }
       } else if (ch === '\n') {
         out += '\\n';
       } else if (ch === '\r') {
@@ -635,7 +651,7 @@ async function startServer() {
 
     try {
       const { content, provider } = await generateAIChatCompletion(
-        "You are a professional Amazon merchant advisor. Output ONLY a raw JSON object — no markdown, no code fences, no explanation outside the JSON. All string values must be valid JSON strings: escape double quotes as \\\" and use \\n for newlines.",
+        "You are a professional Amazon merchant advisor. Output ONLY a raw JSON object — no markdown, no code fences, no explanation outside the JSON. Critical rules for valid JSON: (1) Never use unescaped double-quote characters inside any string value — use Chinese punctuation「」or single quotes instead. (2) Use \\n for line breaks inside strings. (3) No trailing commas.",
         prompt
       );
 
