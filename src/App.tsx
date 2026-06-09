@@ -911,6 +911,60 @@ export default function App() {
     };
   };
 
+  const handleDeleteHistoryDates = async (storeId: string, dates: string[]) => {
+    const dateSet = new Set(dates);
+    const updated: SKUPerformance[] = [];
+    const nextState: Record<string, SKUPerformance> = { ...skuPerformance };
+
+    Object.keys(nextState).forEach(key => {
+      if (nextState[key].storeId !== storeId) return;
+      const filtered = (nextState[key].history || []).filter(h => !dateSet.has(h.date));
+      nextState[key] = { ...nextState[key], history: filtered };
+      updated.push(nextState[key]);
+    });
+
+    if (updated.length === 0) return;
+
+    const res = await fetch("/api/skus/bulk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updated),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.message || body.error || `Firebase 写入失败 ${res.status}`);
+    }
+
+    setSkuPerformance(nextState);
+    showToast(`已删除 ${dates.length} 个周次的销售数据`);
+  };
+
+  const handleClearInventory = async (storeId: string) => {
+    const updated: SKUPerformance[] = [];
+    const nextState: Record<string, SKUPerformance> = { ...skuPerformance };
+
+    Object.keys(nextState).forEach(key => {
+      if (nextState[key].storeId !== storeId) return;
+      nextState[key] = { ...nextState[key], currentStock: 0 };
+      updated.push(nextState[key]);
+    });
+
+    if (updated.length === 0) return;
+
+    const res = await fetch("/api/skus/bulk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updated),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.message || body.error || `Firebase 写入失败 ${res.status}`);
+    }
+
+    setSkuPerformance(nextState);
+    showToast("已清除当前店铺的库存数据");
+  };
+
   const handleAddAction = (sku: string, type: any, title: string, details: string, status: any, date: string) => {
     if (!title.trim()) return;
     
@@ -1522,6 +1576,9 @@ export default function App() {
               inventoryInputRef={inventoryInputRef}
               handleSalesUpload={handleSalesUpload}
               handleInventoryUpload={handleInventoryUpload}
+              skuPerformance={skuPerformance}
+              onDeleteDates={handleDeleteHistoryDates}
+              onClearInventory={handleClearInventory}
             />
           )}
 

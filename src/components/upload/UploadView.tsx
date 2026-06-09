@@ -2,7 +2,8 @@ import React from "react";
 import { FileText, Package, Loader2, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../../lib/utils";
-import { Store } from "../../types";
+import { Store, SKUPerformance } from "../../types";
+import { DataManagePanel } from "./DataManagePanel";
 
 interface UploadViewProps {
   stores: Store[];
@@ -13,6 +14,9 @@ interface UploadViewProps {
   inventoryInputRef: React.RefObject<HTMLInputElement>;
   handleSalesUpload: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
   handleInventoryUpload: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
+  skuPerformance: Record<string, SKUPerformance>;
+  onDeleteDates: (storeId: string, dates: string[]) => Promise<void>;
+  onClearInventory: (storeId: string) => Promise<void>;
 }
 
 export function UploadView({
@@ -24,6 +28,9 @@ export function UploadView({
   inventoryInputRef,
   handleSalesUpload,
   handleInventoryUpload,
+  skuPerformance,
+  onDeleteDates,
+  onClearInventory,
 }: UploadViewProps) {
   return (
             <div className="max-w-5xl mx-auto py-16 px-8">
@@ -142,6 +149,14 @@ export function UploadView({
                   </motion.div>
                 )}
               </AnimatePresence>
+
+              <DataManagePanel
+                stores={stores}
+                activeStoreId={activeStoreId}
+                skuPerformance={skuPerformance}
+                onDeleteDates={onDeleteDates}
+                onClearInventory={onClearInventory}
+              />
             </div>
   );
 }
