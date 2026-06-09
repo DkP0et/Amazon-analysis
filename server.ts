@@ -165,9 +165,53 @@ function extractJSON(raw: string): string {
   if (start !== -1 && end > start) {
     const candidate = s.slice(start, end + 1);
     try { JSON.parse(candidate); return candidate; } catch {}
+    // Try repairing the candidate
+    const repaired = repairJSON(candidate);
+    try { JSON.parse(repaired); return repaired; } catch {}
   }
 
-  return s;
+  // Last resort: repair the whole string
+  return repairJSON(s);
+}
+
+function repairJSON(s: string): string {
+  // Replace literal newlines/tabs inside JSON string values with escape sequences.
+  // We walk char by char tracking whether we're inside a string to avoid
+  // mangling structural characters.
+  let out = '';
+  let inString = false;
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (inString) {
+      if (ch === '\\') {
+        // Keep escape sequence intact
+        out += ch + (s[i + 1] ?? '');
+        i += 2;
+        continue;
+      } else if (ch === '"') {
+        inString = false;
+        out += ch;
+      } else if (ch === '\n') {
+        out += '\\n';
+      } else if (ch === '\r') {
+        out += '\\r';
+      } else if (ch === '\t') {
+        out += '\\t';
+      } else {
+        out += ch;
+      }
+    } else {
+      if (ch === '"') inString = true;
+      out += ch;
+    }
+    i++;
+  }
+
+  // Remove trailing commas before } or ]
+  out = out.replace(/,(\s*[}\]])/g, '$1');
+
+  return out;
 }
 
 async function callProvider(providerName: string, settings: ProviderSettings, systemInstruction: string, prompt: string): Promise<{ content: string; provider: string }> {
