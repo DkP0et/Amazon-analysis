@@ -203,6 +203,62 @@ export async function saveAIConfig(config: AIConfig): Promise<void> {
   writeFileSync(p, JSON.stringify({ ...config, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
 }
 
+export async function deleteSkuHistoryDates(storeId: string, dates: string[]): Promise<number> {
+  const dateSet = new Set(dates);
+  const db = await readDb();
+
+  let removedCount = 0;
+  const toSave: SKU[] = [];
+
+  db.skus.forEach((sku) => {
+    if (sku.storeId !== storeId || !Array.isArray(sku.history)) return;
+    const before = sku.history.length;
+    const filtered = sku.history.filter((h: any) => !dateSet.has(h.date));
+    if (filtered.length !== before) {
+      removedCount += before - filtered.length;
+      toSave.push({ ...sku, history: filtered, lastUpdated: new Date().toISOString() });
+    }
+  });
+
+  if (toSave.length === 0) return 0;
+  await overwriteSkus(toSave);
+  return removedCount;
+}
+
+export async function clearSkuInventory(storeId: string): Promise<number> {
+  const db = await readDb();
+
+  const toSave: SKU[] = [];
+  db.skus.forEach((sku) => {
+    if (sku.storeId !== storeId) return;
+    toSave.push({ ...sku, currentStock: 0, lastUpdated: new Date().toISOString() });
+  });
+
+  if (toSave.length === 0) return 0;
+  await overwriteSkus(toSave);
+  return toSave.length;
+}
+
+// Full overwrite (no merge) — ensures array fields are replaced not unioned
+async function overwriteSkus(skus: SKU[]): Promise<void> {
+  const firestore = getDb();
+  const chunkSize = 400;
+
+  for (let i = 0; i < skus.length; i += chunkSize) {
+    const chunk = skus.slice(i, i + chunkSize);
+    const batch = firestore.batch();
+    chunk.forEach((sku) => {
+      if (!sku.sku || !sku.storeId) return;
+      const docId = `${sku.storeId}_${sku.sku}`;
+      const data: SKU = { ...sku };
+      delete data.analysisLoading;
+      // set WITHOUT merge — replaces the whole document, ensuring history array is fully replaced
+      batch.set(firestore.collection("skus").doc(docId), data);
+    });
+    await batch.commit();
+  }
+}
+
 export async function bulkSaveSkus(skus: SKU[]): Promise<number> {
   const firestore = getDb();
   const chunkSize = 400;
