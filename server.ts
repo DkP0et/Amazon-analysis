@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import { GoogleGenAI } from "@google/genai";
-import { readDb, writeDb, getAIConfig, saveAIConfig, AIConfig, ProviderSettings } from "./server/db";
+import { readDb, writeDb, getAIConfig, saveAIConfig, AIConfig, ProviderSettings, deleteSkus } from "./server/db";
 import fs from "fs";
 
 dotenv.config();
@@ -494,6 +494,20 @@ async function startServer() {
       res.json({ success: true, count: skus.length });
     } catch (error: any) {
       res.status(500).json({ error: "批量保存SKU数据失败", message: error.message });
+    }
+  });
+
+  // 7b. Delete specific SKUs from a store
+  app.delete("/api/skus", async (req, res) => {
+    try {
+      const { storeId, skus } = req.body as { storeId: string; skus: string[] };
+      if (!storeId || !Array.isArray(skus) || skus.length === 0) {
+        return res.status(400).json({ error: "缺少 storeId 或 skus 列表" });
+      }
+      const deleted = await deleteSkus(storeId, skus);
+      res.json({ success: true, deleted });
+    } catch (error: any) {
+      res.status(500).json({ error: "删除SKU失败", message: error.message });
     }
   });
 
