@@ -17,6 +17,7 @@ interface UploadViewProps {
   skuPerformance: Record<string, SKUPerformance>;
   onDeleteDates: (storeId: string, dates: string[]) => Promise<void>;
   onClearInventory: (storeId: string) => Promise<void>;
+  onDeleteSkus: (storeId: string, skus: string[]) => Promise<void>;
 }
 
 export function UploadView({
@@ -31,6 +32,7 @@ export function UploadView({
   skuPerformance,
   onDeleteDates,
   onClearInventory,
+  onDeleteSkus,
 }: UploadViewProps) {
   return (
             <div className="max-w-5xl mx-auto py-16 px-8">
@@ -156,6 +158,7 @@ export function UploadView({
                 skuPerformance={skuPerformance}
                 onDeleteDates={onDeleteDates}
                 onClearInventory={onClearInventory}
+                onDeleteSkus={onDeleteSkus}
               />
             </div>
   );

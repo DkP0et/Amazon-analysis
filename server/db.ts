@@ -142,6 +142,24 @@ export async function deleteStore(storeId: string): Promise<void> {
   await batch.commit();
 }
 
+export async function deleteSkus(storeId: string, skuIds: string[]): Promise<number> {
+  const firestore = getDb();
+  const chunkSize = 400;
+  let deleted = 0;
+
+  for (let i = 0; i < skuIds.length; i += chunkSize) {
+    const chunk = skuIds.slice(i, i + chunkSize);
+    const batch = firestore.batch();
+    chunk.forEach((sku) => {
+      batch.delete(firestore.collection("skus").doc(`${storeId}_${sku}`));
+      deleted++;
+    });
+    await batch.commit();
+  }
+
+  return deleted;
+}
+
 export async function getSkus(storeId?: string): Promise<SKU[]> {
   const firestore = getDb();
   let query = firestore.collection("skus") as FirebaseFirestore.Query;

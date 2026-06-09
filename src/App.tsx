@@ -939,6 +939,24 @@ export default function App() {
     showToast(`已删除 ${dates.length} 个周次的销售数据`);
   };
 
+  const handleDeleteSkus = async (storeId: string, skus: string[]) => {
+    const res = await fetch("/api/skus", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ storeId, skus }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.message || body.error || `Firebase 删除失败 ${res.status}`);
+    }
+    setSkuPerformance(prev => {
+      const next = { ...prev };
+      skus.forEach(sku => { delete next[sku]; });
+      return next;
+    });
+    showToast(`已删除 ${skus.length} 个 SKU`);
+  };
+
   const handleClearInventory = async (storeId: string) => {
     const updated: SKUPerformance[] = [];
     const nextState: Record<string, SKUPerformance> = { ...skuPerformance };
@@ -1579,6 +1597,7 @@ export default function App() {
               skuPerformance={skuPerformance}
               onDeleteDates={handleDeleteHistoryDates}
               onClearInventory={handleClearInventory}
+              onDeleteSkus={handleDeleteSkus}
             />
           )}
 

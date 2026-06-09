@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import { GoogleGenAI } from "@google/genai";
-import { readDb, writeDb, getAIConfig, saveAIConfig, AIConfig, ProviderSettings } from "./server/db";
+import { readDb, writeDb, getAIConfig, saveAIConfig, AIConfig, ProviderSettings, deleteSkus } from "./server/db";
 import fs from "fs";
 
 dotenv.config();
@@ -165,9 +165,53 @@ function extractJSON(raw: string): string {
   if (start !== -1 && end > start) {
     const candidate = s.slice(start, end + 1);
     try { JSON.parse(candidate); return candidate; } catch {}
+    // Try repairing the candidate
+    const repaired = repairJSON(candidate);
+    try { JSON.parse(repaired); return repaired; } catch {}
   }
 
-  return s;
+  // Last resort: repair the whole string
+  return repairJSON(s);
+}
+
+function repairJSON(s: string): string {
+  // Replace literal newlines/tabs inside JSON string values with escape sequences.
+  // We walk char by char tracking whether we're inside a string to avoid
+  // mangling structural characters.
+  let out = '';
+  let inString = false;
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (inString) {
+      if (ch === '\\') {
+        // Keep escape sequence intact
+        out += ch + (s[i + 1] ?? '');
+        i += 2;
+        continue;
+      } else if (ch === '"') {
+        inString = false;
+        out += ch;
+      } else if (ch === '\n') {
+        out += '\\n';
+      } else if (ch === '\r') {
+        out += '\\r';
+      } else if (ch === '\t') {
+        out += '\\t';
+      } else {
+        out += ch;
+      }
+    } else {
+      if (ch === '"') inString = true;
+      out += ch;
+    }
+    i++;
+  }
+
+  // Remove trailing commas before } or ]
+  out = out.replace(/,(\s*[}\]])/g, '$1');
+
+  return out;
 }
 
 async function callProvider(providerName: string, settings: ProviderSettings, systemInstruction: string, prompt: string): Promise<{ content: string; provider: string }> {
@@ -450,6 +494,20 @@ async function startServer() {
       res.json({ success: true, count: skus.length });
     } catch (error: any) {
       res.status(500).json({ error: "批量保存SKU数据失败", message: error.message });
+    }
+  });
+
+  // 7b. Delete specific SKUs from a store
+  app.delete("/api/skus", async (req, res) => {
+    try {
+      const { storeId, skus } = req.body as { storeId: string; skus: string[] };
+      if (!storeId || !Array.isArray(skus) || skus.length === 0) {
+        return res.status(400).json({ error: "缺少 storeId 或 skus 列表" });
+      }
+      const deleted = await deleteSkus(storeId, skus);
+      res.json({ success: true, deleted });
+    } catch (error: any) {
+      res.status(500).json({ error: "删除SKU失败", message: error.message });
     }
   });
 
