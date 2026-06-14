@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../../lib/utils";
 import { Store, SKUPerformance } from "../../types";
 import { DataManagePanel } from "./DataManagePanel";
+import { ExportPanel } from "./ExportPanel";
 
 interface UploadViewProps {
   stores: Store[];
@@ -151,6 +152,12 @@ export function UploadView({
                   </motion.div>
                 )}
               </AnimatePresence>
+
+              <ExportPanel
+                stores={stores}
+                activeStoreId={activeStoreId}
+                skuPerformance={skuPerformance}
+              />
 
               <DataManagePanel
                 stores={stores}
